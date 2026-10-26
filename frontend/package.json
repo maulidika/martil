@@ -1,0 +1,23 @@
+{
+  "name": "martil-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Martil multiplayer card game client",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "martil": "file:..",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.14.1",
+    "socket.io-client": "^4.8.3",
+    "zustand": "^4.4.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.0",
+    "vite": "^5.0.8"
+  }
+}

@@ -14,9 +14,10 @@ const C = {
 export default function GamePage() {
   const navigate = useNavigate()
   const { user, roomCode, gameState, currentTurn, selectedIds,
-          toggleCard, clearSelection, events, roomInfo } = useGameStore()
+          toggleCard, clearSelection, events, roomInfo, connected, setError } = useGameStore()
   const { playCards, skipTurn } = useSocket()
 
+  const currentRoomCode = roomCode || roomInfo?.code
   const myTurn   = currentTurn === user?.id
   const myHand   = gameState?.myHand ? sortHand(gameState.myHand) : []
   const selected = myHand.filter(c => selectedIds.includes(c.id))
@@ -51,16 +52,23 @@ export default function GamePage() {
 
   /* ── actions ─────────────────────────────────────────────── */
   const handlePlay = useCallback(() => {
-    if (!combo || !myTurn || !roomCode) return
-    playCards(roomCode, selectedIds)
+    if (!currentRoomCode) return setError('Room code tidak tersedia')
+    if (!myTurn) return setError('Bukan giliranmu')
+    if (!combo) return setError('Kombinasi tidak valid')
+    if (!connected) return setError('Belum terkoneksi ke server')
+
+    playCards(currentRoomCode, selectedIds)
     clearSelection()
-  }, [combo, myTurn, roomCode, selectedIds])
+  }, [combo, connected, currentRoomCode, myTurn, selectedIds, setError])
 
   const handleSkip = useCallback(() => {
-    if (!myTurn || !roomCode) return
-    skipTurn(roomCode)
+    if (!currentRoomCode) return setError('Room code tidak tersedia')
+    if (!myTurn) return setError('Bukan giliranmu')
+    if (!connected) return setError('Belum terkoneksi ke server')
+
+    skipTurn(currentRoomCode)
     clearSelection()
-  }, [myTurn, roomCode])
+  }, [connected, currentRoomCode, myTurn, setError])
 
   if (!gameState) return (
     <div style={{ ...flex('center'), height:'100dvh', background:C.bg, flexDirection:'column', gap:12 }}>
@@ -162,15 +170,15 @@ export default function GamePage() {
       <div style={{ display:'flex', gap:10, padding:'8px 16px 20px', flexShrink:0 }}>
         <button
           onClick={handleSkip}
-          disabled={!myTurn}
-          style={{ ...actionBtn, flex:1, background:C.deep, color: myTurn ? C.text : C.muted, border:`1px solid ${C.border}` }}
+          disabled={!connected || !myTurn}
+          style={{ ...actionBtn, flex:1, background:C.deep, color: (connected && myTurn) ? C.text : C.muted, border:`1px solid ${C.border}` }}
         >
           Skip
         </button>
         <button
           onClick={handlePlay}
-          disabled={!combo || !myTurn}
-          style={{ ...actionBtn, flex:2, background: (combo && myTurn) ? C.accent : '#333', color: (combo && myTurn) ? '#fff' : C.muted }}
+          disabled={!connected || !combo || !myTurn}
+          style={{ ...actionBtn, flex:2, background: (connected && combo && myTurn) ? C.accent : '#333', color: (connected && combo && myTurn) ? '#fff' : C.muted }}
         >
           {selected.length > 0 ? `Main (${selected.length} kartu)` : 'Pilih kartu'}
         </button>

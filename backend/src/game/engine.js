@@ -33,6 +33,7 @@ class GameEngine {
       currentTurn: playerIds[startIdx],
       table: [],             // [{ playerId, combo }]  – current rally
       skipCount: 0,
+      passedPlayers: [],     // players who passed in current rally
       lastPlayerId: null,    // who last played a non-skip in this rally
       turnStartedAt: Date.now(),
     };
@@ -61,14 +62,38 @@ class GameEngine {
     const played = new Set(cardIds);
     const newHand = hand.filter(c => !played.has(c.id));
     const newHands = { ...state.hands, [playerId]: newHand };
-    const newTable = [...state.table, { playerId, combo }];
-    const next     = GameEngine._next(state.playerIds, playerId);
+    const passedSet = new Set(state.passedPlayers || []);
+    const newTable  = [...state.table, { playerId, combo }];
+    const next      = GameEngine._nextActive(state.playerIds, playerId, passedSet);
+    const rallyId   = state.table.length === 0 ? 'reset' : `${state.table.length}-${state.lastPlayerId || 'none'}`;
+    console.log('[rally-debug] processPlay', {
+      currentPlayer: playerId,
+      lastPlayer: state.lastPlayerId,
+      passedPlayers: state.passedPlayers || [],
+      nextPlayer: next || playerId,
+      rallyId,
+    });
+
+    if (!next) {
+      const resetState = {
+        ...state,
+        hands: newHands,
+        table: [],
+        skipCount: 0,
+        passedPlayers: [],
+        lastPlayerId: playerId,
+        currentTurn: playerId,
+        turnStartedAt: Date.now(),
+      };
+      return ok(resetState, { type: 'cards_played', playerId, combo });
+    }
 
     const newState = {
       ...state,
       hands: newHands,
       table: newTable,
       skipCount: 0,
+      passedPlayers: state.passedPlayers || [],
       lastPlayerId: playerId,
       currentTurn: next,
       turnStartedAt: Date.now(),
@@ -94,28 +119,47 @@ class GameEngine {
     if (state.phase !== 'playing')      return err('GAME_NOT_ACTIVE');
     if (state.currentTurn !== playerId) return err('NOT_YOUR_TURN');
 
-    const newSkip = state.skipCount + 1;
-    const next    = GameEngine._next(state.playerIds, playerId);
+    const passedSet = new Set(state.passedPlayers || []);
+    passedSet.add(playerId);
+    const activePlayers = state.playerIds.filter((id) => !passedSet.has(id));
+    const rallyId = state.table.length === 0 ? 'reset' : `${state.table.length}-${state.lastPlayerId || 'none'}`;
 
-    if (newSkip >= 3) {
-      // Rally ends – last player leads free
+    if (activePlayers.length === 1) {
+      const remainingPlayer = activePlayers[0];
+      console.log('[rally-debug] processSkip', {
+        currentPlayer: playerId,
+        lastPlayer: state.lastPlayerId,
+        passedPlayers: Array.from(passedSet),
+        nextPlayer: remainingPlayer,
+        rallyId,
+      });
       const newState = {
         ...state,
         table: [],
         skipCount: 0,
+        passedPlayers: [],
         lastPlayerId: null,
-        currentTurn: state.lastPlayerId,
+        currentTurn: remainingPlayer,
         turnStartedAt: Date.now(),
       };
-      return ok(newState, { type: 'rally_ended', nextPlayer: state.lastPlayerId });
+      return ok(newState, { type: 'rally_ended', nextPlayer: remainingPlayer });
     }
 
+    const next = GameEngine._nextActive(state.playerIds, playerId, passedSet);
     const newState = {
       ...state,
-      skipCount: newSkip,
+      skipCount: passedSet.size,
+      passedPlayers: Array.from(passedSet),
       currentTurn: next,
       turnStartedAt: Date.now(),
     };
+    console.log('[rally-debug] processSkip', {
+      currentPlayer: playerId,
+      lastPlayer: state.lastPlayerId,
+      passedPlayers: Array.from(passedSet),
+      nextPlayer: next,
+      rallyId,
+    });
     return ok(newState, { type: 'player_skipped', playerId, nextTurn: next });
   }
 
@@ -144,6 +188,18 @@ class GameEngine {
 
   static _next(ids, currentId) {
     return ids[(ids.indexOf(currentId) + 1) % ids.length];
+  }
+
+  static _nextActive(ids, currentId, passedSet) {
+    const startIdx = ids.indexOf(currentId);
+    if (startIdx === -1) return null;
+
+    for (let i = 1; i < ids.length; i += 1) {
+      const candidate = ids[(startIdx + i) % ids.length];
+      if (!passedSet.has(candidate)) return candidate;
+    }
+
+    return null;
   }
 }
 
