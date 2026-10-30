@@ -35,5 +35,3 @@ mnt/user-data/outputs/
 # editor directories
 .vscode/
 .idea/
-
-backend/data/

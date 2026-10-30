@@ -7,6 +7,13 @@ const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
 
 let socketSingleton = null
 
+// Emit from pages without creating additional socket lifecycle owners.
+export function emitSocket(event, data) {
+  if (!socketSingleton?.connected) return false
+  socketSingleton.emit(event, data)
+  return true
+}
+
 export function useSocket() {
   const navigate = useNavigate()
   const {
@@ -95,9 +102,7 @@ export function useSocket() {
     }
   }, [token])
 
-  const emit = useCallback((event, data) => {
-    socketSingleton?.emit(event, data)
-  }, [])
+  const emit = useCallback((event, data) => emitSocket(event, data), [])
 
   return {
     createRoom: (maxGames = 4)           => emit('create_room', { maxGames }),

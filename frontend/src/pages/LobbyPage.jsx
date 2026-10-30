@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
-import { useSocket } from '../hooks/useSocket'
+import { emitSocket } from '../hooks/useSocket'
 
 const C = { bg:'#1a1a2e', card:'#16213e', accent:'#e94560', muted:'#888', border:'#1a4a7a', text:'#eee', green:'#2ecc71', yellow:'#f39c12' }
 
@@ -28,7 +28,6 @@ const s = {
 export default function LobbyPage() {
   const navigate  = useNavigate()
   const { user, token, roomCode, roomInfo, logout } = useGameStore()
-  const { createRoom, joinRoom, startGame } = useSocket()
   const [joinInput, setJoinInput] = useState('')
   const [maxGames, setMaxGames]   = useState(4)
   const [localErr, setLocalErr]   = useState('')
@@ -45,19 +44,19 @@ export default function LobbyPage() {
 
   function doCreate() {
     setLocalErr('')
-    createRoom(maxGames)
+    emitSocket('create_room', { maxGames })
   }
 
   function doJoin() {
     const code = joinInput.trim().toUpperCase()
     if (code.length < 4) return setLocalErr('Masukkan kode room yang valid.')
-    joinRoom(code)
+    emitSocket('join_room', { roomCode: code })
     setLocalErr('')
   }
 
   function doStart() {
     if (!ready) return setLocalErr('Butuh 4 pemain untuk mulai.')
-    startGame(roomCode)
+    emitSocket('start_game', { roomCode })
   }
 
   function doLogout() {

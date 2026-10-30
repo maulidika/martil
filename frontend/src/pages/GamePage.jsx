@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
-import { useSocket } from '../hooks/useSocket'
+import { emitSocket } from '../hooks/useSocket'
 import { detectCombo, sortHand, comboLabel, cardLabel, SUIT_SYM, IS_RED } from '../utils/comboDetector'
 
 /* ── palette ─────────────────────────────────────────────── */
@@ -15,7 +15,6 @@ export default function GamePage() {
   const navigate = useNavigate()
   const { user, roomCode, gameState, currentTurn, selectedIds,
           toggleCard, clearSelection, events, roomInfo, connected, setError } = useGameStore()
-  const { playCards, skipTurn } = useSocket()
 
   const currentRoomCode = roomCode || roomInfo?.code
   const myTurn   = currentTurn === user?.id
@@ -57,7 +56,7 @@ export default function GamePage() {
     if (!combo) return setError('Kombinasi tidak valid')
     if (!connected) return setError('Belum terkoneksi ke server')
 
-    playCards(currentRoomCode, selectedIds)
+    emitSocket('play_cards', { roomCode: currentRoomCode, cardIds: selectedIds })
     clearSelection()
   }, [combo, connected, currentRoomCode, myTurn, selectedIds, setError])
 
@@ -66,7 +65,7 @@ export default function GamePage() {
     if (!myTurn) return setError('Bukan giliranmu')
     if (!connected) return setError('Belum terkoneksi ke server')
 
-    skipTurn(currentRoomCode)
+    emitSocket('skip_turn', { roomCode: currentRoomCode })
     clearSelection()
   }, [connected, currentRoomCode, myTurn, setError])
 
