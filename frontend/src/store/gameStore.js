@@ -1,7 +1,15 @@
 import { create } from 'zustand'
 
+// Auth harus disimpan per-tab. localStorage dibagi oleh semua tab pada
+// origin yang sama, sehingga login akun A di tab lain bisa menimpa akun ini.
+// sessionStorage terisolasi per tab dan tetap bertahan saat tab di-refresh.
+try {
+  localStorage.removeItem('martil_user')
+  localStorage.removeItem('martil_token')
+} catch {}
+
 const stored = (key, fallback = null) => {
-  try { return JSON.parse(localStorage.getItem(key)) ?? fallback }
+  try { return JSON.parse(sessionStorage.getItem(key)) ?? fallback }
   catch { return fallback }
 }
 
@@ -11,13 +19,13 @@ export const useGameStore = create((set, get) => ({
   token: stored('martil_token'),
 
   setAuth(user, token) {
-    localStorage.setItem('martil_user',  JSON.stringify(user))
-    localStorage.setItem('martil_token', JSON.stringify(token))
+    sessionStorage.setItem('martil_user',  JSON.stringify(user))
+    sessionStorage.setItem('martil_token', JSON.stringify(token))
     set({ user, token })
   },
   logout() {
-    localStorage.removeItem('martil_user')
-    localStorage.removeItem('martil_token')
+    sessionStorage.removeItem('martil_user')
+    sessionStorage.removeItem('martil_token')
     set({ user: null, token: null, roomCode: null, roomInfo: null, gameState: null })
   },
 
