@@ -7,6 +7,10 @@ const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
 
 let socketSingleton = null
 
+function debugLog(action, details = {}) {
+  console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details)
+}
+
 // Emit from pages without creating additional socket lifecycle owners.
 export function emitSocket(event, data) {
   if (!socketSingleton?.connected) return false
@@ -34,8 +38,8 @@ export function useSocket() {
 
     const s = socketSingleton
 
-    s.on('connect',    () => setConnected(true))
-    s.on('disconnect', () => setConnected(false))
+    s.on('connect',    () => { setConnected(true); debugLog('SOCKET_CONNECTED', { socketId: s.id }) })
+    s.on('disconnect', (reason) => { setConnected(false); debugLog('SOCKET_DISCONNECTED', { reason }) })
     s.on('connect_error', (e) => setError(e.message))
 
     s.on('error', ({ code }) => {
@@ -49,6 +53,7 @@ export function useSocket() {
     })
 
     s.on('room_updated', (state) => {
+      debugLog('ROOM_UPDATED', { roomCode: state?.code, status: state?.status, playerCount: state?.players?.length })
       setRoomInfo(state)
       setRoomCode(state.code)
       if (state.game) setGameState(state.game)
@@ -91,12 +96,30 @@ export function useSocket() {
     })
 
     s.on('set_over', (data) => {
+      debugLog('SET_OVER_RECEIVED', { rankingsCount: data?.rankings?.length })
       setSetResult(data)
       pushEvent({ type: 'set_over', ...data })
-      setTimeout(() => navigate('/result'), 2000)
+      setTimeout(() => {
+        // Jangan menimpa navigasi jika pemain sudah berhasil meninggalkan room.
+        if (useGameStore.getState().setResult === data) navigate('/result')
+      }, 2000)
+    })
+
+    s.on('room_left', (data) => {
+      debugLog('ROOM_LEFT_CONFIRMED', data)
+      useGameStore.getState().clearRoomState()
+      navigate('/lobby')
+    })
+
+    s.on('leave_room_error', ({ code }) => {
+      debugLog('LEAVE_ROOM_FAILED', { code })
+      setError(`Gagal keluar dari room: ${code}`)
+      // ResultPage akan kembali mengaktifkan tombol melalui store event.
+      useGameStore.getState().pushEvent({ type: 'leave_room_error', code })
     })
 
     return () => {
+      debugLog('SOCKET_OWNER_CLEANUP', { socketId: s.id })
       s.disconnect()
       socketSingleton = null
     }

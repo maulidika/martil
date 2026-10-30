@@ -38,6 +38,16 @@ export const useGameStore = create((set, get) => ({
   roomInfo: null,
   setRoomCode: (code) => set({ roomCode: code }),
   setRoomInfo:  (info) => set({ roomInfo: info }),
+  clearRoomState: () => set({
+    roomCode: null,
+    roomInfo: null,
+    gameState: null,
+    currentTurn: null,
+    selectedIds: [],
+    setResult: null,
+    events: [],
+    error: null,
+  }),
 
   // ── Game ────────────────────────────────────────────────────────
   gameState:    null,

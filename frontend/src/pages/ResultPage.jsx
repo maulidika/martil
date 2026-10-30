@@ -1,6 +1,6 @@
 import React from 'react'
-import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
+import { emitSocket } from '../hooks/useSocket'
 
 const C = { bg:'#1a1a2e', surface:'#16213e', accent:'#e94560', text:'#eee', muted:'#888', gold:'#f1c40f', silver:'#bdc3c7', bronze:'#e67e22', green:'#2ecc71', red:'#e74c3c' }
 const MEDAL = ['🥇','🥈','🥉','💀']
@@ -8,20 +8,45 @@ const PRIZE = ['+5k','+3k','-3k','-5k']
 const PRIZE_COLOR = [C.green, C.green, C.red, C.red]
 
 export default function ResultPage() {
-  const navigate = useNavigate()
-  const { setResult, user, roomInfo, setSetResult } = useGameStore()
+  const { setResult, user, roomInfo, roomCode, connected, setError, events, error } = useGameStore()
+  const [leaving, setLeaving] = React.useState(false)
+
+  React.useEffect(() => {
+    if (events[0]?.type === 'leave_room_error') setLeaving(false)
+  }, [events[0]?._id])
 
   const rankings = setResult?.rankings || []
   const setScores = setResult?.setScores || {}
 
   function goLobby() {
-    setSetResult(null)
-    navigate('/lobby')
+    if (leaving) return
+    const code = roomCode || roomInfo?.code
+    if (!code) {
+      setError('Kode room tidak ditemukan. Coba refresh halaman.')
+      return
+    }
+    if (!connected) {
+      setError('Koneksi ke server terputus. Tunggu tersambung sebelum keluar dari room.')
+      return
+    }
+    console.info(`[MARTIL ${new Date().toISOString()}] LEAVE_ROOM_CLICKED`, { roomCode: code })
+    setLeaving(true)
+    const sent = emitSocket('leave_room', { roomCode: code })
+    if (!sent) {
+      setLeaving(false)
+      setError('Gagal mengirim permintaan keluar room. Periksa koneksi server.')
+    }
   }
 
   return (
     <div style={{ minHeight:'100dvh', background:C.bg, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
       <div style={{ width:'100%', maxWidth:400 }}>
+
+        {error && (
+          <div role="alert" style={{ background:'rgba(233,69,96,0.12)', border:`1px solid ${C.accent}`, color:C.accent, borderRadius:8, padding:'9px 12px', fontSize:13, marginBottom:14 }}>
+            {error}
+          </div>
+        )}
 
         <div style={{ textAlign:'center', marginBottom:24 }}>
           <div style={{ fontSize:40, marginBottom:8 }}>🏆</div>
@@ -70,9 +95,10 @@ export default function ResultPage() {
 
         <button
           onClick={goLobby}
+          disabled={leaving}
           style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:C.accent, color:'#fff', border:'none', cursor:'pointer' }}
         >
-          Kembali ke Lobby
+          {leaving ? 'Keluar dari room…' : 'Kembali ke Lobby'}
         </button>
       </div>
     </div>

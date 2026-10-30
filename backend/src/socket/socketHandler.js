@@ -6,6 +6,10 @@ const { TURN_TIMEOUT_MS } = require('../game/engine');
 
 const timers = new Map(); // roomCode → timeoutHandle
 
+function debugLog(action, details = {}) {
+  console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details);
+}
+
 module.exports = function registerSocketHandlers(io) {
 
   // ── Auth middleware ──────────────────────────────────────────────────────
@@ -22,6 +26,7 @@ module.exports = function registerSocketHandlers(io) {
 
   io.on('connection', (socket) => {
     const userId = socket.user.id;
+    debugLog('SOCKET_CONNECTED', { socketId: socket.id, userId });
 
     // ── create_room ────────────────────────────────────────────────────────
     socket.on('create_room', ({ maxGames = 4 } = {}) => {
@@ -58,6 +63,31 @@ module.exports = function registerSocketHandlers(io) {
       socket.emit('room_updated', rm.publicState(roomCode, userId));
       // Tell everyone (including new player) about the updated room
       io.to(roomCode).emit('room_updated', rm.publicState(roomCode, userId));
+    });
+
+    // ── leave_room (available after a completed set) ──────────────────────
+    socket.on('leave_room', ({ roomCode } = {}) => {
+      const code = String(roomCode || '').toUpperCase();
+      debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
+      const result = rm.leaveRoom(code, userId);
+      if (!result.ok) {
+        debugLog('LEAVE_ROOM_REJECTED', { userId, roomCode: code, reason: result.error });
+        socket.emit('leave_room_error', { code: result.error });
+        return socket.emit('error', { code: result.error });
+      }
+
+      // Intentional leave: socket.leave() must not be treated as a disconnect.
+      socket.leave(code);
+      if (!result.roomDeleted) {
+        io.to(code).emit('room_updated', rm.publicState(code, result.room.players[0]?.id));
+      }
+      socket.emit('room_left', { roomCode: code, roomDeleted: result.roomDeleted });
+      debugLog('ROOM_PLAYER_LEFT', {
+        userId,
+        roomCode: code,
+        remainingPlayers: result.room.players.length,
+        roomDeleted: result.roomDeleted,
+      });
     });
 
     // ── start_game ─────────────────────────────────────────────────────────
@@ -123,7 +153,8 @@ module.exports = function registerSocketHandlers(io) {
     });
 
     // ── disconnect ─────────────────────────────────────────────────────────
-    socket.on('disconnecting', () => {
+    socket.on('disconnecting', (reason) => {
+      debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms] });
       for (const roomCode of socket.rooms) {
         if (roomCode === socket.id) continue;
         rm.markDisconnected(roomCode, userId);
@@ -179,11 +210,12 @@ module.exports = function registerSocketHandlers(io) {
     });
 
     if (event.setOver) {
+      clearTimer(roomCode);
+      debugLog('SET_OVER', { roomCode, status: room.status, players: room.players.map(p => p.id) });
       io.to(roomCode).emit('set_over', {
         rankings:  event.rankings,
         setScores: event.setScores,
       });
-      clearTimer(roomCode);
     } else {
       setTimeout(() => {
         const fresh = rm.getRoom(roomCode);

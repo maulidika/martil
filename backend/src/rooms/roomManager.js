@@ -171,6 +171,22 @@ function _handleGameOver(room, event) {
 
 // ─── Disconnect / reconnect ──────────────────────────────────────────────────
 
+function leaveRoom(code, playerId) {
+  const room = rooms.get(code);
+  if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
+  if (room.status !== 'done') return { ok: false, error: 'SET_NOT_FINISHED' };
+
+  const playerIndex = room.players.findIndex(p => p.id === playerId);
+  if (playerIndex === -1) return { ok: false, error: 'NOT_IN_ROOM' };
+
+  room.players.splice(playerIndex, 1);
+  if (room.hostId === playerId) room.hostId = room.players[0]?.id || null;
+
+  const roomDeleted = room.players.length === 0;
+  if (roomDeleted) rooms.delete(code);
+  return { ok: true, room, roomDeleted };
+}
+
 function markDisconnected(code, playerId) {
   const room = rooms.get(code);
   if (!room) return;
@@ -229,4 +245,4 @@ function generateCode() {
   return code;
 }
 
-module.exports = { createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip, markDisconnected, reconnect, publicState };
+module.exports = { createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip, leaveRoom, markDisconnected, reconnect, publicState };

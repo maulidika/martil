@@ -217,3 +217,9 @@ Folder `backend/data/` dibuat otomatis saat server pertama kali berjalan. Pastik
 
 **Koneksi Socket.IO gagal?**
 Pastikan `CLIENT_URL` di `backend/.env` sesuai dengan URL frontend yang berjalan.
+
+**Debug lifecycle room setelah set selesai**
+- Backend menampilkan log berawalan `[MARTIL ...]`, misalnya `SET_OVER`, `LEAVE_ROOM_REQUEST`, `ROOM_PLAYER_LEFT`, dan `SOCKET_DISCONNECTING`.
+- Browser DevTools → Console menampilkan `SET_OVER_RECEIVED`, `LEAVE_ROOM_CLICKED`, `ROOM_LEFT_CONFIRMED`, serta perubahan `ROOM_UPDATED`.
+- Setelah hasil akhir muncul, tombol **Kembali ke Lobby** mengirim event `leave_room`. Frontend baru membersihkan state dan berpindah ke `/lobby` setelah menerima konfirmasi `room_left` dari backend.
+- Jika gagal, periksa kode pada log `LEAVE_ROOM_REJECTED` / `LEAVE_ROOM_FAILED`; jangan langsung menghapus data room secara manual.
