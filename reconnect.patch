@@ -1,0 +1,1565 @@
+diff --git a/README.md b/README.md
+index 929c4fc..af49ea2 100644
+--- a/README.md
++++ b/README.md
+@@ -202,6 +202,35 @@ Poin terkecil = Juara 1. Contoh pembagian hasil: +5k / +3k / -3k / -5k
+ 
+ ---
+ 
++## 🔌 Reconnect & Pemulihan Sesi
++
++Backend adalah sumber kebenaran. Setiap kali socket tersambung (login, refresh, atau reconnect otomatis), klien mengirim `resume_session`; server mencari room pemain berdasarkan akun (bukan kode room) dan membalas:
++
++| Event server → klien | Arti |
++|---|---|
++| `session_restored` | Snapshot lengkap (status room, kartu, giliran, meja, `timeLeft`, `setResult` bila Scoreboard). Klien menimpa seluruh state lalu pindah ke `/lobby`, `/game`, atau `/result` sesuai status. |
++| `session_none` `{reason}` | Tidak ada sesi: `NO_ROOM`, `EXPIRED` (terputus > 60 dtk di room waiting/done), atau `ROOM_CLOSED` (semua pemain terputus > 10 menit). |
++| `session_replaced` | Akun yang sama mengambil alih dari tab/perangkat lain. Tab lama melihat overlay dengan tombol "Pakai di tab ini". |
++| `player_disconnected` / `player_reconnected` | Hanya dikirim ke pemain lain; resume tidak mengirim ulang kartu atau state ke mereka. |
++
++Aturan server:
++- Satu pemain punya satu socket aktif per room; disconnect dari socket lama tidak menandai pemain terputus.
++- `start_game`, `play_cards`, `skip_turn` ditolak (`NOT_IN_ROOM`) dari socket yang belum dipulihkan.
++- Room `waiting`/`done`: pemain terputus > 60 dtk dikeluarkan dan host berpindah ke pemain terhubung. Room `playing`: kursi dipertahankan (giliran yang lewat di-auto-skip) sampai pemain kembali.
++- Pembersih berjalan tiap 10 detik; room yang ditinggalkan semua pemain > 10 menit ditutup beserta timernya.
++
++Di klien, `ConnectionOverlay` menampilkan "Menghubungkan kembali..." dan berubah menjadi pesan gagal + tombol *Coba lagi* bila lebih dari 20 detik (atau 8 detik tanpa jawaban resume). Layar "Menunggu data game…" tidak lagi menggantung: setelah 6 detik meminta ulang state, setelah 15 detik menampilkan pesan dan tombol.
++
++Log penting (backend, awalan `[MARTIL ...]`): `SOCKET_CONNECTED`, `SOCKET_DISCONNECTING`, `PLAYER_DISCONNECTED`, `DISCONNECT_IGNORED`, `SESSION_RESTORED`, `SESSION_RESUME_REJECTED`, `ROOM_PLAYER_EXPIRED`, `ROOM_HOST_CHANGED`, `ROOM_ROOM_ABANDONED`, `AUTO_SKIP`. Di console browser: `SOCKET_CONNECTED/DISCONNECTED`, `SESSION_RESTORED`, `SESSION_NONE`, `SESSION_REPLACED`, `SYNC_FAILED`.
++
++Uji otomatis (tanpa browser, tanpa WebSocket asli):
++```bash
++cd backend  && npm run test:sim        # server: protokol resume, timer, host, kadaluarsa
++cd frontend && bash tests/sync.sim/run.sh   # klien: state machine koneksi
++```
++
++---
++
+ ## 🐛 Troubleshooting
+ 
+ **Port sudah dipakai?**
+diff --git a/backend/package.json b/backend/package.json
+index d6539cc..5679ae2 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -6,7 +6,8 @@
+   "scripts": {
+     "start": "node src/server.js",
+     "dev": "nodemon src/server.js",
+-    "test": "jest"
++    "test": "jest",
++    "test:sim": "node tests/reconnect.sim.js"
+   },
+   "dependencies": {
+     "bcryptjs": "^3.0.3",
+diff --git a/backend/src/rooms/roomManager.js b/backend/src/rooms/roomManager.js
+index caad955..2a8d24b 100644
+--- a/backend/src/rooms/roomManager.js
++++ b/backend/src/rooms/roomManager.js
+@@ -9,7 +9,12 @@ const { db } = require('../db/database');
+ // Completed results are persisted to SQLite.
+ const rooms = new Map(); // roomCode → roomState
+ 
+-const RECONNECT_WINDOW_MS = 60_000;
++const RECONNECT_WINDOW_MS  = 60_000;       // batas pemain terputus sebelum dikeluarkan (room waiting/done)
++const ABANDONED_ROOM_MS    = 10 * 60_000;  // semua pemain terputus selama ini → room dianggap ditinggalkan
++const REMOVAL_MEMORY_MS    = 10 * 60_000;  // berapa lama alasan "dikeluarkan" diingat untuk resume berikutnya
++
++// userId → { code, reason, at } — agar pemain yang kembali setelah dikeluarkan mendapat pesan yang jelas
++const removals = new Map();
+ 
+ // ─── Room creation & joining ─────────────────────────────────────────────────
+ 
+@@ -23,7 +28,7 @@ function createRoom(hostId, maxGames = 4) {
+     hostId,
+     maxGames,
+     status: 'waiting',
+-    players: [{ id: hostId, connected: true, disconnectedAt: null }],
++    players: [{ id: hostId, connected: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() }],
+     setId: null,
+     setScores: {},
+     currentGame: null,
+@@ -47,7 +52,7 @@ function joinRoom(code, playerId) {
+   if (room.players.length >= 4)                    return { ok: false, error: 'ROOM_FULL' };
+   if (room.players.find(p => p.id === playerId))   return { ok: false, error: 'ALREADY_IN_ROOM' };
+ 
+-  room.players.push({ id: playerId, connected: true, disconnectedAt: null });
++  room.players.push({ id: playerId, connected: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
+   return { ok: true, room };
+ }
+ 
+@@ -157,6 +162,8 @@ function _handleGameOver(room, event) {
+     event.setOver    = true;
+     event.rankings   = rankings;
+     event.setScores  = room.setScores;
++    // Disimpan agar pemain yang refresh/reconnect di Scoreboard bisa melihat hasil yang sama.
++    room.setResult   = { rankings, setScores: { ...room.setScores } };
+   } else {
+     // Next game — winner leads
+     room.currentGame = GameEngine.initGame(
+@@ -187,32 +194,143 @@ function leaveRoom(code, playerId) {
+   return { ok: true, room, roomDeleted };
+ }
+ 
+-function markDisconnected(code, playerId) {
++function markDisconnected(code, playerId, socketId = null, now = Date.now()) {
+   const room = rooms.get(code);
+-  if (!room) return;
++  if (!room) return false;
+   const p = room.players.find(p => p.id === playerId);
+-  if (p) { p.connected = false; p.disconnectedAt = Date.now(); }
++  if (!p || !p.connected) return false;
+ 
+-  // Migrate host if needed
+-  if (room.hostId === playerId) {
+-    const next = room.players.find(p => p.id !== playerId && p.connected);
+-    if (next) room.hostId = next.id;
+-  }
++  // Socket lama yang telat putus (refresh / tab lain) tidak boleh menandai
++  // pemain yang sudah terikat ke socket yang lebih baru sebagai terputus.
++  if (socketId && p.socketId && p.socketId !== socketId) return false;
++
++  p.connected = false;
++  p.disconnectedAt = now;
++  // Perpindahan host sengaja ditunda sampai batas reconnect lewat (lihat _expireRoom),
++  // supaya host yang hanya refresh tidak kehilangan perannya.
++  return true;
+ }
+ 
+-function reconnect(code, playerId) {
++/** Ikat socket aktif ke pemain (dipanggil saat create/join room). */
++function bindSocket(code, playerId, socketId) {
+   const room = rooms.get(code);
+-  if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
++  const p = room?.players.find(p => p.id === playerId);
++  if (!p) return false;
++  p.socketId = socketId;
++  p.connected = true;
++  p.disconnectedAt = null;
++  return true;
++}
+ 
+-  const p = room.players.find(p => p.id === playerId);
+-  if (!p) return { ok: false, error: 'NOT_IN_ROOM' };
++/** Cari room tempat pemain menjadi anggota. Game yang sedang berjalan didahulukan. */
++function findRoomByPlayer(userId, hintCode = null) {
++  if (hintCode) {
++    const hinted = rooms.get(hintCode);
++    if (hinted?.players.some(p => p.id === userId)) return hinted;
++  }
++  let best = null;
++  let bestJoined = -1;
++  for (const room of rooms.values()) {
++    const p = room.players.find(p => p.id === userId);
++    if (!p) continue;
++    if (room.status === 'playing') return room;
++    if (p.joinedAt > bestJoined) { best = room; bestJoined = p.joinedAt; }
++  }
++  return best;
++}
++
++/**
++ * Hapus pemain yang terputus melebihi batas waktu (room waiting/done) dan
++ * pindahkan host bila perlu. Return daftar event untuk di-broadcast.
++ * Pemain di game yang sedang berjalan TIDAK dihapus (kursi dipertahankan).
++ */
++function _expireRoom(room, now) {
++  const events = [];
++  const code = room.code;
++
++  if (room.status === 'waiting' || room.status === 'done') {
++    for (const p of [...room.players]) {
++      if (!p.connected && p.disconnectedAt != null && now - p.disconnectedAt > RECONNECT_WINDOW_MS) {
++        room.players.splice(room.players.indexOf(p), 1);
++        removals.set(p.id, { code, reason: 'EXPIRED', at: now });
++        events.push({ type: 'player_expired', code, playerId: p.id });
++      }
++    }
++    if (room.players.length === 0) {
++      rooms.delete(code);
++      events.push({ type: 'room_deleted', code });
++      return events;
++    }
++  }
+ 
+-  const elapsed = Date.now() - (p.disconnectedAt || 0);
+-  if (elapsed > RECONNECT_WINDOW_MS) return { ok: false, error: 'RECONNECT_EXPIRED' };
++  const host = room.players.find(p => p.id === room.hostId);
++  const hostGone = !host || (!host.connected && host.disconnectedAt != null && now - host.disconnectedAt > RECONNECT_WINDOW_MS);
++  if (hostGone) {
++    const next = room.players.find(p => p.connected && p.id !== room.hostId) || (!host ? room.players[0] : null);
++    if (next && next.id !== room.hostId) {
++      room.hostId = next.id;
++      events.push({ type: 'host_changed', code, hostId: next.id });
++    }
++  }
++  return events;
++}
++
++/** Dipanggil periodik: kadaluarsakan pemain terputus dan tutup room yang ditinggalkan. */
++function sweepExpired(now = Date.now()) {
++  const events = [];
++  for (const room of [...rooms.values()]) {
++    const allGone = room.players.length > 0 && room.players.every(p => !p.connected);
++    if (allGone) {
++      const lastSeen = Math.max(...room.players.map(p => p.disconnectedAt ?? 0));
++      if (now - lastSeen > ABANDONED_ROOM_MS) {
++        for (const p of room.players) removals.set(p.id, { code: room.code, reason: 'ROOM_CLOSED', at: now });
++        rooms.delete(room.code);
++        events.push({ type: 'room_abandoned', code: room.code });
++        continue;
++      }
++    }
++    events.push(..._expireRoom(room, now));
++  }
++  for (const [id, r] of removals) if (now - r.at > REMOVAL_MEMORY_MS) removals.delete(id);
++  return events;
++}
++
++/**
++ * Pulihkan sesi pemain (refresh / koneksi putus / login di tab baru).
++ * Tidak membuat room atau game baru dan tidak mengacak kartu: hanya mengikat
++ * socket baru ke keanggotaan yang sudah ada.
++ */
++function resumeSession(userId, socketId, now = Date.now(), hintCode = null) {
++  const room = findRoomByPlayer(userId, hintCode);
++  if (!room) {
++    const rem = removals.get(userId);
++    if (rem && now - rem.at <= REMOVAL_MEMORY_MS) {
++      removals.delete(userId);
++      return { ok: false, error: rem.reason, events: [] };
++    }
++    return { ok: false, error: 'NO_ROOM', events: [] };
++  }
+ 
++  const events = _expireRoom(room, now);
++  const p = room.players.find(p => p.id === userId);
++  if (!p) {
++    const rem = removals.get(userId);
++    removals.delete(userId);
++    return { ok: false, error: rem?.reason || 'NOT_IN_ROOM', events };
++  }
++
++  const wasDisconnected = !p.connected;
++  const previousSocketId = p.socketId;
+   p.connected = true;
+   p.disconnectedAt = null;
+-  return { ok: true, room };
++  p.socketId = socketId;
++  return { ok: true, room, wasDisconnected, previousSocketId, events };
++}
++
++/** Mulai ulang jam giliran (dipakai setelah jeda antar-game agar timeLeft sama dengan timer server). */
++function restartTurnClock(code) {
++  const room = rooms.get(code);
++  if (room?.currentGame) room.currentGame.turnStartedAt = Date.now();
+ }
+ 
+ // ─── Public view ─────────────────────────────────────────────────────────────
+@@ -245,4 +363,8 @@ function generateCode() {
+   return code;
+ }
+ 
+-module.exports = { createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip, leaveRoom, markDisconnected, reconnect, publicState };
++module.exports = {
++  createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip,
++  leaveRoom, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
++  restartTurnClock, publicState, RECONNECT_WINDOW_MS,
++};
+diff --git a/backend/src/socket/socketHandler.js b/backend/src/socket/socketHandler.js
+index d360ecb..7ccbb11 100644
+--- a/backend/src/socket/socketHandler.js
++++ b/backend/src/socket/socketHandler.js
+@@ -10,7 +10,10 @@ function debugLog(action, details = {}) {
+   console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details);
+ }
+ 
+-module.exports = function registerSocketHandlers(io) {
++const SWEEP_INTERVAL_MS = 10_000;
++
++module.exports = function registerSocketHandlers(io, opts = {}) {
++  const sweepIntervalMs = opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
+ 
+   // ── Auth middleware ──────────────────────────────────────────────────────
+   io.use((socket, next) => {
+@@ -33,6 +36,7 @@ module.exports = function registerSocketHandlers(io) {
+       const result = rm.createRoom(userId, maxGames);
+       if (!result.ok) return socket.emit('error', { code: result.error });
+ 
++      rm.bindSocket(result.room.code, userId, socket.id);
+       socket.join(result.room.code);
+       socket.emit('room_created', { code: result.room.code });
+       socket.emit('room_updated', rm.publicState(result.room.code, userId));
+@@ -43,28 +47,26 @@ module.exports = function registerSocketHandlers(io) {
+       const room = rm.getRoom(roomCode);
+       if (!room) return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
+ 
+-      // Reconnect path
+-      const existing = room.players.find(p => p.id === userId);
+-      if (existing && !existing.connected) {
+-        const result = rm.reconnect(roomCode, userId);
+-        if (!result.ok) return socket.emit('error', { code: result.error });
+-
+-        socket.join(roomCode);
+-        socket.emit('reconnected', rm.publicState(roomCode, userId));
+-        socket.to(roomCode).emit('player_reconnected', { playerId: userId });
+-        return;
++      // Pemain sudah menjadi anggota room ini → pulihkan sesi (bukan join baru)
++      if (room.players.some(p => p.id === userId)) {
++        return resumeFor(socket, roomCode);
+       }
+ 
+       // Fresh join
+       const result = rm.joinRoom(roomCode, userId);
+       if (!result.ok) return socket.emit('error', { code: result.error });
+ 
++      rm.bindSocket(roomCode, userId, socket.id);
+       socket.join(roomCode);
+       socket.emit('room_updated', rm.publicState(roomCode, userId));
+       // Tell everyone (including new player) about the updated room
+       io.to(roomCode).emit('room_updated', rm.publicState(roomCode, userId));
+     });
+ 
++    // ── resume_session ─────────────────────────────────────────────────────
++    // Dikirim klien setiap kali socket tersambung (login, refresh, atau reconnect).
++    socket.on('resume_session', () => resumeFor(socket));
++
+     // ── leave_room (available after a completed set) ──────────────────────
+     socket.on('leave_room', ({ roomCode } = {}) => {
+       const code = String(roomCode || '').toUpperCase();
+@@ -92,6 +94,7 @@ module.exports = function registerSocketHandlers(io) {
+ 
+     // ── start_game ─────────────────────────────────────────────────────────
+     socket.on('start_game', ({ roomCode }) => {
++      if (!requireInRoom(socket, roomCode)) return;
+       const room = rm.getRoom(roomCode);
+       if (!room)                   return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
+       if (room.hostId !== userId)  return socket.emit('error', { code: 'NOT_HOST' });
+@@ -110,6 +113,7 @@ module.exports = function registerSocketHandlers(io) {
+ 
+     // ── play_cards ─────────────────────────────────────────────────────────
+     socket.on('play_cards', ({ roomCode, cardIds }) => {
++      if (!requireInRoom(socket, roomCode)) return;
+       clearTimer(roomCode);
+ 
+       const result = rm.processPlay(roomCode, userId, cardIds);
+@@ -132,6 +136,7 @@ module.exports = function registerSocketHandlers(io) {
+ 
+     // ── skip_turn ──────────────────────────────────────────────────────────
+     socket.on('skip_turn', ({ roomCode }) => {
++      if (!requireInRoom(socket, roomCode)) return;
+       clearTimer(roomCode);
+ 
+       const result = rm.processSkip(roomCode, userId);
+@@ -153,16 +158,93 @@ module.exports = function registerSocketHandlers(io) {
+     });
+ 
+     // ── disconnect ─────────────────────────────────────────────────────────
++    // Hanya socket yang masih menjadi socket aktif pemain yang dihitung sebagai terputus.
+     socket.on('disconnecting', (reason) => {
+-      debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms] });
++      debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms].filter(r => r !== socket.id) });
+       for (const roomCode of socket.rooms) {
+         if (roomCode === socket.id) continue;
+-        rm.markDisconnected(roomCode, userId);
+-        socket.to(roomCode).emit('player_disconnected', { playerId: userId });
++        const changed = rm.markDisconnected(roomCode, userId, socket.id);
++        if (changed) {
++          socket.to(roomCode).emit('player_disconnected', { playerId: userId });
++          debugLog('PLAYER_DISCONNECTED', { roomCode, userId, socketId: socket.id });
++        } else {
++          debugLog('DISCONNECT_IGNORED', { roomCode, userId, socketId: socket.id, why: 'socket sudah digantikan atau pemain sudah terputus' });
++        }
+       }
+     });
+   });
+ 
++  // ── Session resume ─────────────────────────────────────────────────────────
++
++  function requireInRoom(socket, roomCode) {
++    if (roomCode && socket.rooms.has(roomCode)) return true;
++    socket.emit('error', { code: 'NOT_IN_ROOM' });
++    return false;
++  }
++
++  function resumeFor(socket, hintCode = null) {
++    const userId = socket.user.id;
++    const r = rm.resumeSession(userId, socket.id, Date.now(), hintCode);
++    if (r.events?.length) broadcastRoomEvents(r.events);
++
++    if (!r.ok) {
++      if (r.error !== 'NO_ROOM') debugLog('SESSION_RESUME_REJECTED', { userId, socketId: socket.id, reason: r.error });
++      socket.emit('session_none', { reason: r.error });
++      return;
++    }
++
++    const { room } = r;
++    const code = room.code;
++
++    // Satu pemain = satu socket aktif per room: socket lain milik akun yang sama dilepas dari room.
++    let replaced = 0;
++    for (const [, other] of io.sockets.sockets) {
++      if (other.id === socket.id || other.user?.id !== userId || !other.rooms.has(code)) continue;
++      other.leave(code);
++      other.emit('session_replaced', { roomCode: code });
++      replaced += 1;
++    }
++
++    socket.join(code);
++    socket.emit('session_restored', { ...rm.publicState(code, userId), setResult: room.setResult || null });
++    if (r.wasDisconnected) socket.to(code).emit('player_reconnected', { playerId: userId });
++
++    debugLog('SESSION_RESTORED', {
++      userId, roomCode: code, status: room.status, socketId: socket.id,
++      wasDisconnected: r.wasDisconnected, replacedSockets: replaced,
++      game: room.currentGame ? { gameNumber: room.currentGame.gameNumber, currentTurn: room.currentGame.currentTurn } : null,
++    });
++  }
++
++  // ── Sweeper: kadaluarsakan pemain terputus & tutup room yang ditinggalkan ──
++
++  function broadcastRoomEvents(events) {
++    const touched = new Set();
++    for (const e of events) {
++      debugLog(`ROOM_${e.type.toUpperCase()}`, e);
++      if (e.type === 'room_deleted' || e.type === 'room_abandoned') clearTimer(e.code);
++      else touched.add(e.code);
++    }
++    for (const code of touched) {
++      const room = rm.getRoom(code);
++      if (!room) continue;
++      if (room.status === 'playing') emitPrivateStates(io, code, room);
++      else io.to(code).emit('room_updated', rm.publicState(code, null));
++    }
++  }
++
++  function sweep(now = Date.now()) {
++    const events = rm.sweepExpired(now);
++    if (events.length) broadcastRoomEvents(events);
++    return events;
++  }
++
++  let sweepTimer = null;
++  if (sweepIntervalMs > 0) {
++    sweepTimer = setInterval(() => sweep(), sweepIntervalMs);
++    sweepTimer.unref?.();
++  }
++
+   // ── Timer helpers ──────────────────────────────────────────────────────────
+ 
+   function startTimer(io, roomCode) {
+@@ -171,11 +253,12 @@ module.exports = function registerSocketHandlers(io) {
+     if (!room?.currentGame) return;
+ 
+     const handle = setTimeout(() => {
++      const skippedId = rm.getRoom(roomCode)?.currentGame?.currentTurn ?? null; // sebelum giliran berpindah
+       const autoResult = rm.processAutoSkip(roomCode);
+       if (!autoResult) return;
+ 
+       const { event, room } = autoResult;
+-      const skippedId = room.currentGame?.currentTurn ?? null;
++      debugLog('AUTO_SKIP', { roomCode, playerId: skippedId, result: event.type });
+       io.to(roomCode).emit('auto_skipped', { playerId: skippedId });
+ 
+       if (event.type === 'rally_ended') {
+@@ -220,6 +303,7 @@ module.exports = function registerSocketHandlers(io) {
+       setTimeout(() => {
+         const fresh = rm.getRoom(roomCode);
+         if (!fresh?.currentGame) return;
++        rm.restartTurnClock(roomCode); // timeLeft yang dikirim harus sama dengan timer server (30 dtk penuh)
+         emitPrivateStates(io, roomCode, fresh);
+         io.to(roomCode).emit('game_started', {
+           gameNumber:  event.nextGame,
+@@ -240,4 +324,6 @@ module.exports = function registerSocketHandlers(io) {
+       socket.emit('game_state', rm.publicState(roomCode, uid));
+     }
+   }
++
++  return { sweep, stop() { if (sweepTimer) clearInterval(sweepTimer); } };
+ };
+diff --git b/backend/tests/reconnect.sim.js b/backend/tests/reconnect.sim.js
+new file mode 100644
+index 0000000..51f1764
+--- /dev/null
++++ b/backend/tests/reconnect.sim.js
+@@ -0,0 +1,363 @@
++'use strict';
++/**
++ * Simulasi multiplayer untuk sistem reconnect — menjalankan socketHandler.js,
++ * roomManager.js, dan engine.js ASLI dengan Socket.IO tiruan di memori.
++ *
++ *   npm run test:sim      (dari folder backend)
++ *
++ * Yang di-stub: JWT (token = JSON), database (no-op), uuid (crypto.randomUUID).
++ * Waktu disimulasikan dengan menggeser Date.now(), jadi tidak perlu menunggu 60 detik.
++ * Skrip ini TIDAK menguji transport WebSocket asli maupun React — untuk itu gunakan
++ * uji manual 4 tab (lihat README).
++ */
++
++const assert = require('node:assert/strict');
++const Module = require('module');
++const path = require('path');
++const crypto = require('crypto');
++
++// ── Stub dependensi eksternal sebelum memuat kode server ─────────────────────
++const SRC = path.join(__dirname, '../src');
++function stub(rel, exports) {
++  const file = require.resolve(path.join(SRC, rel));
++  require.cache[file] = { id: file, filename: file, loaded: true, exports };
++}
++stub('auth/jwt.js', { verifyToken: (t) => JSON.parse(t), signToken: () => '' });
++stub('db/database.js', { db: () => ({ prepare: () => ({ run() {}, get() {}, all() { return []; } }), exec() {} }) });
++const origLoad = Module._load;
++Module._load = function (request, ...rest) {
++  if (request === 'uuid') return { v4: () => crypto.randomUUID() };
++  return origLoad.call(this, request, ...rest);
++};
++
++// ── Jam simulasi ─────────────────────────────────────────────────────────────
++const realNow = Date.now.bind(Date);
++let offsetMs = 0;
++Date.now = () => realNow() + offsetMs;
++const advance = (ms) => { offsetMs += ms; };
++
++const rm = require(path.join(SRC, 'rooms/roomManager.js'));
++const registerSocketHandlers = require(path.join(SRC, 'socket/socketHandler.js'));
++
++// Kurangi noise log server selama simulasi
++const realInfo = console.info;
++const realLog = console.log;
++console.info = () => {};
++console.log = () => {};
++
++// ── Socket.IO tiruan ─────────────────────────────────────────────────────────
++class FakeSocket {
++  constructor(io, id) {
++    this.io = io; this.id = id; this.rooms = new Set([id]);
++    this.handlers = {}; this.inbox = []; this.handshake = { auth: {} };
++  }
++  on(ev, fn) { this.handlers[ev] = fn; }
++  emit(ev, data) { this.inbox.push({ ev, data }); }
++  join(room) { this.rooms.add(room); }
++  leave(room) { this.rooms.delete(room); }
++  to(room) { return { emit: (ev, data) => this.io._deliver(room, ev, data, this.id) }; }
++}
++class FakeIO {
++  constructor() { this.sockets = { sockets: new Map() }; this._mw = null; this._conn = null; this._n = 0; }
++  use(fn) { this._mw = fn; }
++  on(ev, fn) { if (ev === 'connection') this._conn = fn; }
++  to(room) { return { emit: (ev, data) => this._deliver(room, ev, data, null) }; }
++  _deliver(room, ev, data, exceptId) {
++    for (const [, s] of this.sockets.sockets) if (s.rooms.has(room) && s.id !== exceptId) s.emit(ev, data);
++  }
++  connect(userId) {
++    const s = new FakeSocket(this, `sock-${++this._n}`);
++    s.handshake.auth.token = JSON.stringify({ id: userId, username: userId });
++    let err = null;
++    this._mw(s, (e) => { err = e; });
++    assert.equal(err, undefined, 'middleware menolak');
++    this.sockets.sockets.set(s.id, s);
++    this._conn(s);
++    return new Client(this, s, userId);
++  }
++}
++class Client {
++  constructor(io, socket, userId) { this.io = io; this.socket = socket; this.userId = userId; }
++  emit(ev, data) { this.socket.handlers[ev]?.(data); }
++  all(ev) { return this.socket.inbox.filter(m => m.ev === ev).map(m => m.data); }
++  last(ev) { const a = this.all(ev); return a[a.length - 1]; }
++  clear() { this.socket.inbox.length = 0; }
++  disconnect(reason = 'transport close') {
++    this.socket.handlers.disconnecting?.(reason);
++    this.socket.rooms.clear();
++    this.io.sockets.sockets.delete(this.socket.id);
++  }
++}
++
++// ── Helper skenario ──────────────────────────────────────────────────────────
++let seq = 0;
++function setup() {
++  const io = new FakeIO();
++  const handle = registerSocketHandlers(io, { sweepIntervalMs: 0 });
++  return { io, handle };
++}
++const uid = (p) => `${p}${++seq}`;
++function newRoom(io, n, { start = false } = {}) {
++  const users = Array.from({ length: n }, (_, i) => uid(`u${i + 1}_`));
++  const clients = users.map(u => io.connect(u));
++  clients[0].emit('create_room', { maxGames: 4 });
++  const code = clients[0].last('room_created').code;
++  for (let i = 1; i < n; i++) clients[i].emit('join_room', { roomCode: code });
++  if (start) clients[0].emit('start_game', { roomCode: code });
++  return { users, clients, code };
++}
++const player = (code, id) => rm.getRoom(code).players.find(p => p.id === id);
++const handIds = (restoredOrState) => (restoredOrState.game?.myHand || []).map(c => c.id);
++
++// ── Daftar uji ───────────────────────────────────────────────────────────────
++const tests = [];
++const test = (name, fn) => tests.push({ name, fn });
++
++test('sanity: 4 pemain masuk, game mulai, semua menerima 13 kartu', () => {
++  const { io } = setup();
++  const { clients, code } = newRoom(io, 4, { start: true });
++  for (const c of clients) {
++    assert.equal(c.last('game_state').game.myHand.length, 13);
++    assert.equal(c.last('game_started').gameNumber, 1);
++  }
++  assert.equal(rm.getRoom(code).status, 'playing');
++});
++
++test('resume tanpa room → session_none NO_ROOM', () => {
++  const { io } = setup();
++  const c = io.connect(uid('solo_'));
++  c.emit('resume_session');
++  assert.equal(c.last('session_none').reason, 'NO_ROOM');
++});
++
++test('refresh saat game: kartu, giliran, meja, dan timer dipulihkan; pemain lain tidak terganggu', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  const turnId = clients[0].last('game_started').currentTurn;
++  const turnIdx = users.indexOf(turnId);
++  // pemain yang sedang giliran memainkan 1 kartu agar ada state meja
++  const first = clients[turnIdx];
++  const card = first.last('game_state').game.myHand[0];
++  first.emit('play_cards', { roomCode: code, cardIds: [card.id] });
++  const room = rm.getRoom(code);
++  const expectedTurn = room.currentGame.currentTurn;
++
++  const bIdx = (turnIdx + 2) % 4;                       // pemain lain yang akan refresh
++  const b1 = clients[bIdx];
++  const handBefore = b1.last('game_state').game.myHand.map(c => c.id);
++  const othersBefore = clients.filter((_, i) => i !== bIdx).map(c => c.socket.inbox.length);
++
++  b1.disconnect();                                       // tab di-refresh
++  assert.equal(player(code, users[bIdx]).connected, false);
++  for (const [i, c] of clients.entries()) if (i !== bIdx) assert.equal(c.last('player_disconnected').playerId, users[bIdx]);
++
++  advance(10_000);                                       // 10 detik berlalu saat reload
++  const b2 = io.connect(users[bIdx]);
++  b2.emit('resume_session');
++
++  const restored = b2.last('session_restored');
++  assert.ok(restored, 'session_restored tidak dikirim');
++  assert.equal(restored.status, 'playing');
++  assert.equal(restored.code, code);
++  assert.deepEqual(handIds(restored), handBefore, 'kartu berubah/teracak');
++  assert.equal(restored.game.currentTurn, expectedTurn);
++  assert.equal(restored.game.table.length, 1);
++  assert.ok(restored.game.timeLeft > 19_000 && restored.game.timeLeft <= 20_000, `timeLeft=${restored.game.timeLeft}`);
++  assert.equal(player(code, users[bIdx]).connected, true);
++  assert.equal(b2.all('game_started').length, 0, 'tidak boleh memulai game baru');
++  assert.equal(rm.getRoom(code).currentGame.gameNumber, 1);
++  for (const [i, c] of clients.entries()) if (i !== bIdx) assert.equal(c.last('player_reconnected').playerId, users[bIdx]);
++  // pemain lain tidak menerima game_state/game_started tambahan akibat resume
++  const others = clients.filter((_, i) => i !== bIdx);
++  others.forEach((c, i) => {
++    const extra = c.socket.inbox.slice(othersBefore[i]).filter(m => ['game_state', 'game_started', 'room_updated'].includes(m.ev));
++    assert.equal(extra.length, 0, `pemain lain menerima ${extra.map(m => m.ev)}`);
++  });
++});
++
++test('race: socket baru resume SEBELUM socket lama putus → pemain tidak ditandai terputus', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  const old = clients[1];
++  const fresh = io.connect(users[1]);
++  fresh.emit('resume_session');
++  assert.equal(old.last('session_replaced').roomCode, code);
++  old.disconnect('ping timeout');                        // baru terdeteksi putus belakangan
++  assert.equal(player(code, users[1]).connected, true, 'pemain salah ditandai terputus');
++  assert.equal(clients[2].all('player_disconnected').length, 0);
++  assert.ok(fresh.socket.rooms.has(code));
++});
++
++test('markDisconnected mengabaikan socket lama yang bukan socket aktif (pertahanan berlapis)', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 2);
++  const oldId = clients[1].socket.id;
++  const fresh = io.connect(users[1]);
++  fresh.emit('resume_session');                          // socket aktif sekarang = fresh
++  assert.equal(rm.markDisconnected(code, users[1], oldId), false);
++  assert.equal(player(code, users[1]).connected, true);
++  assert.equal(rm.markDisconnected(code, users[1], fresh.socket.id), true);
++});
++
++test('resume dua kali bersifat idempoten (tidak duplikasi room/anggota)', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  clients[3].disconnect();
++  const c = io.connect(users[3]);
++  c.emit('resume_session');
++  c.emit('resume_session');
++  assert.equal(c.all('session_restored').length, 2);
++  assert.equal(rm.getRoom(code).players.filter(p => p.id === users[3]).length, 1);
++  assert.equal(rm.findRoomByPlayer(users[3]).code, code);
++  assert.equal(clients[0].all('player_reconnected').length, 1, 'player_reconnected terkirim dobel');
++});
++
++test('socket belum di-resume tidak boleh bermain (NOT_IN_ROOM) dan tidak mengubah giliran', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  const turnId = clients[0].last('game_started').currentTurn;
++  const idx = users.indexOf(turnId);
++  clients[idx].disconnect();
++  const stale = io.connect(turnId);                      // tersambung tapi belum resume
++  stale.emit('skip_turn', { roomCode: code });
++  stale.emit('play_cards', { roomCode: code, cardIds: ['x'] });
++  assert.deepEqual(stale.all('error').map(e => e.code), ['NOT_IN_ROOM', 'NOT_IN_ROOM']);
++  assert.equal(rm.getRoom(code).currentGame.currentTurn, turnId);
++  stale.emit('resume_session');
++  stale.emit('skip_turn', { roomCode: code });           // sekarang sah
++  assert.notEqual(rm.getRoom(code).currentGame.currentTurn, turnId);
++});
++
++test('tab ganda satu akun: tab terakhir mengambil alih, tab lama dilepas', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  const second = io.connect(users[0]);
++  second.emit('resume_session');
++  assert.equal(clients[0].last('session_replaced').roomCode, code);
++  clients[0].emit('skip_turn', { roomCode: code });
++  assert.equal(clients[0].last('error').code, 'NOT_IN_ROOM');
++});
++
++test('host refresh di Room (waiting) dalam batas waktu → tetap host', () => {
++  const { io, handle } = setup();
++  const { users, clients, code } = newRoom(io, 3);
++  clients[0].disconnect();
++  advance(30_000);
++  handle.sweep();
++  assert.equal(rm.getRoom(code).hostId, users[0]);
++  const h = io.connect(users[0]);
++  h.emit('resume_session');
++  const r = h.last('session_restored');
++  assert.equal(r.status, 'waiting');
++  assert.equal(r.hostId, users[0]);
++  assert.equal(r.players.length, 3);
++  assert.equal(r.game, null);
++});
++
++test('pemain waiting terputus > 60 dtk dikeluarkan; host berpindah; resume → EXPIRED lalu NO_ROOM', () => {
++  const { io, handle } = setup();
++  const { users, clients, code } = newRoom(io, 3);
++  clients[0].disconnect();                               // host putus
++  advance(61_000);
++  handle.sweep();
++  const room = rm.getRoom(code);
++  assert.equal(room.players.length, 2);
++  assert.notEqual(room.hostId, users[0]);
++  assert.ok(room.players.some(p => p.id === room.hostId && p.connected));
++  const upd = clients[1].last('room_updated');
++  assert.equal(upd.players.length, 2);
++  assert.equal(upd.hostId, room.hostId);
++
++  const back = io.connect(users[0]);
++  back.emit('resume_session');
++  assert.equal(back.last('session_none').reason, 'EXPIRED');
++  back.emit('resume_session');
++  assert.equal(back.all('session_none').pop().reason, 'NO_ROOM');
++});
++
++test('room waiting kosong dihapus setelah semua pemain kadaluarsa', () => {
++  const { io, handle } = setup();
++  const { clients, code } = newRoom(io, 2);
++  clients.forEach(c => c.disconnect());
++  advance(61_000);
++  handle.sweep();
++  assert.equal(rm.getRoom(code), null);
++});
++
++test('game berjalan: pemain terputus lama tetap punya kursi dan bisa kembali', () => {
++  const { io, handle } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  clients[2].disconnect();
++  advance(5 * 60_000);
++  handle.sweep();
++  assert.equal(rm.getRoom(code).players.length, 4);
++  const c = io.connect(users[2]);
++  c.emit('resume_session');
++  assert.equal(c.last('session_restored').status, 'playing');
++  assert.equal(c.last('session_restored').game.myHand.length, 13);
++});
++
++test('host terputus lama saat game berjalan → host berpindah ke pemain terhubung, kursi tetap', () => {
++  const { io, handle } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  clients[0].disconnect();
++  advance(61_000);
++  handle.sweep();
++  const room = rm.getRoom(code);
++  assert.equal(room.players.length, 4);
++  assert.notEqual(room.hostId, users[0]);
++  // pemain lain menerima game_state personal (bukan room_updated yang membocorkan kartu)
++  assert.ok(clients[1].last('game_state'));
++  assert.equal(clients[1].all('room_updated').filter(r => r.game).length, 0);
++});
++
++test('Scoreboard: refresh saat status done memulihkan hasil set', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  const room = rm.getRoom(code);
++  room.status = 'done'; room.currentGame = null;         // simulasi set selesai (white-box)
++  room.setResult = { rankings: [{ id: users[0], totalScore: -5 }], setScores: { [users[0]]: -5 } };
++  clients[1].disconnect();
++  const c = io.connect(users[1]);
++  c.emit('resume_session');
++  const r = c.last('session_restored');
++  assert.equal(r.status, 'done');
++  assert.equal(r.game, null);
++  assert.deepEqual(r.setResult.rankings[0].id, users[0]);
++});
++
++test('room ditinggalkan semua pemain > 10 menit ditutup & timer dibersihkan; resume → ROOM_CLOSED', () => {
++  const { io, handle } = setup();
++  const { users, clients, code } = newRoom(io, 4, { start: true });
++  clients.forEach(c => c.disconnect());
++  advance(9 * 60_000);
++  handle.sweep();
++  assert.ok(rm.getRoom(code), 'ditutup terlalu cepat');
++  advance(2 * 60_000);
++  handle.sweep();
++  assert.equal(rm.getRoom(code), null);
++  const c = io.connect(users[0]);
++  c.emit('resume_session');
++  assert.equal(c.last('session_none').reason, 'ROOM_CLOSED');
++});
++
++test('join_room oleh anggota yang sudah ada diperlakukan sebagai resume (bukan ALREADY_IN_ROOM)', () => {
++  const { io } = setup();
++  const { users, clients, code } = newRoom(io, 2);
++  clients[1].disconnect();
++  const c = io.connect(users[1]);
++  c.emit('join_room', { roomCode: code });
++  assert.equal(c.last('session_restored').code, code);
++  assert.equal(c.all('error').length, 0);
++});
++
++// ── Runner ───────────────────────────────────────────────────────────────────
++let failed = 0;
++for (const { name, fn } of tests) {
++  offsetMs = 0;
++  try { fn(); realLog(`  PASS  ${name}`); }
++  catch (e) { failed += 1; realLog(`  FAIL  ${name}\n        ${e.message.split('\n').join('\n        ')}`); }
++}
++console.info = realInfo;
++realLog(`\n${tests.length - failed}/${tests.length} lulus`);
++process.exit(failed ? 1 : 0);
+diff --git a/frontend/src/App.jsx b/frontend/src/App.jsx
+index 682c13a..07e7bf6 100644
+--- a/frontend/src/App.jsx
++++ b/frontend/src/App.jsx
+@@ -6,6 +6,7 @@ import LoginPage  from './pages/LoginPage'
+ import LobbyPage  from './pages/LobbyPage'
+ import GamePage   from './pages/GamePage'
+ import ResultPage from './pages/ResultPage'
++import ConnectionOverlay from './components/ConnectionOverlay'
+ 
+ function PrivateRoute({ children }) {
+   const user = useGameStore(s => s.user)
+@@ -19,6 +20,7 @@ export default function App() {
+   useSocket()
+ 
+   return (
++    <>
+     <Routes>
+       <Route path="/login" element={user ? <Navigate to="/lobby" replace /> : <LoginPage />} />
+       <Route path="/lobby" element={<PrivateRoute><LobbyPage /></PrivateRoute>} />
+@@ -26,5 +28,7 @@ export default function App() {
+       <Route path="/result" element={<PrivateRoute><ResultPage /></PrivateRoute>} />
+       <Route path="*" element={<Navigate to={user ? '/lobby' : '/login'} replace />} />
+     </Routes>
++    <ConnectionOverlay />
++    </>
+   )
+ }
+diff --git b/frontend/src/components/ConnectionOverlay.jsx b/frontend/src/components/ConnectionOverlay.jsx
+new file mode 100644
+index 0000000..ddb5bc8
+--- /dev/null
++++ b/frontend/src/components/ConnectionOverlay.jsx
+@@ -0,0 +1,108 @@
++import React, { useEffect } from 'react'
++import { useNavigate } from 'react-router-dom'
++import { useGameStore } from '../store/gameStore'
++import { requestResume, retryConnection } from '../hooks/useSocket'
++
++const C = { bg:'#1a1a2e', surface:'#16213e', accent:'#e94560', muted:'#888', border:'#1a4a7a', text:'#eee', yellow:'#f1c40f' }
++
++const btn = {
++  padding:'11px 18px', borderRadius:8, fontSize:14, fontWeight:600,
++  border:'none', cursor:'pointer',
++}
++
++/**
++ * Overlay penuh layar untuk status koneksi + banner pesan singkat.
++ * Tampil hanya bila pemain sudah login (token ada) dan status sinkronisasi bukan 'ok'.
++ */
++export default function ConnectionOverlay() {
++  const navigate = useNavigate()
++  const token      = useGameStore(s => s.token)
++  const sync       = useGameStore(s => s.sync)
++  const syncMessage = useGameStore(s => s.syncMessage)
++  const notice     = useGameStore(s => s.notice)
++  const setNotice  = useGameStore(s => s.setNotice)
++  const logout     = useGameStore(s => s.logout)
++
++  // Pesan singkat hilang sendiri setelah beberapa detik.
++  useEffect(() => {
++    if (!notice) return
++    const t = setTimeout(() => setNotice(null), 8000)
++    return () => clearTimeout(t)
++  }, [notice, setNotice])
++
++  const showOverlay = !!token && sync !== 'ok'
++
++  function doLogout() {
++    logout()
++    navigate('/login', { replace: true })
++  }
++
++  let title = 'Menghubungkan kembali...'
++  let body = 'Mencoba tersambung ke server. Jangan tutup halaman ini.'
++  let actions = null
++  let spinning = true
++
++  if (sync === 'resuming') {
++    title = 'Memulihkan permainan...'
++    body = 'Terhubung. Mengambil kondisi terakhir dari server.'
++  } else if (sync === 'failed') {
++    spinning = false
++    title = 'Gagal terhubung'
++    body = syncMessage || 'Tidak bisa terhubung ke server.'
++    actions = (
++      <>
++        <button style={{ ...btn, background:C.accent, color:'#fff' }} onClick={retryConnection}>Coba lagi</button>
++        <button style={{ ...btn, background:'#0f3460', color:C.text, border:`1px solid ${C.border}` }} onClick={() => window.location.reload()}>Muat ulang halaman</button>
++      </>
++    )
++  } else if (sync === 'auth_failed') {
++    spinning = false
++    title = 'Sesi login berakhir'
++    body = syncMessage || 'Silakan login ulang.'
++    actions = <button style={{ ...btn, background:C.accent, color:'#fff' }} onClick={doLogout}>Login ulang</button>
++  } else if (sync === 'replaced') {
++    spinning = false
++    title = 'Dipakai di tab lain'
++    body = syncMessage || 'Akun ini sedang dipakai di tab atau perangkat lain.'
++    actions = <button style={{ ...btn, background:C.accent, color:'#fff' }} onClick={requestResume}>Pakai di tab ini</button>
++  }
++
++  return (
++    <>
++      {notice && (
++        <div role="status" style={{
++          position:'fixed', top:12, left:'50%', transform:'translateX(-50%)', zIndex:3000,
++          maxWidth:'92vw', background:C.surface, color:C.text, fontSize:13,
++          padding:'10px 14px', borderRadius:10, border:`1px solid ${C.yellow}`,
++          display:'flex', gap:12, alignItems:'center',
++        }}>
++          <span>{notice}</span>
++          <span style={{ cursor:'pointer', color:C.muted }} onClick={() => setNotice(null)}>✕</span>
++        </div>
++      )}
++
++      {showOverlay && (
++        <div role="alertdialog" aria-live="assertive" style={{
++          position:'fixed', inset:0, zIndex:2000, background:'rgba(10,10,25,0.94)',
++          display:'flex', alignItems:'center', justifyContent:'center', padding:24,
++        }}>
++          <style>{'@keyframes martil-spin { to { transform: rotate(360deg) } }'}</style>
++          <div style={{ maxWidth:340, textAlign:'center', color:C.text }}>
++            {spinning ? (
++              <div style={{
++                width:36, height:36, margin:'0 auto 18px', borderRadius:'50%',
++                border:`3px solid ${C.border}`, borderTopColor:C.accent,
++                animation:'martil-spin 0.9s linear infinite',
++              }} />
++            ) : (
++              <div style={{ fontSize:32, marginBottom:12 }}>🃏</div>
++            )}
++            <div style={{ fontSize:18, fontWeight:700, marginBottom:8 }}>{title}</div>
++            <div style={{ fontSize:13, color:C.muted, lineHeight:1.5, marginBottom: actions ? 18 : 0 }}>{body}</div>
++            {actions && <div style={{ display:'flex', gap:10, justifyContent:'center', flexWrap:'wrap' }}>{actions}</div>}
++          </div>
++        </div>
++      )}
++    </>
++  )
++}
+diff --git b/frontend/src/components/GameSyncWaiting.jsx b/frontend/src/components/GameSyncWaiting.jsx
+new file mode 100644
+index 0000000..567fb40
+--- /dev/null
++++ b/frontend/src/components/GameSyncWaiting.jsx
+@@ -0,0 +1,52 @@
++import React, { useEffect, useState } from 'react'
++import { useGameStore } from '../store/gameStore'
++import { requestResume } from '../hooks/useSocket'
++
++const C = { bg:'#1a1a2e', accent:'#e94560', muted:'#888', border:'#1a4a7a', text:'#eee' }
++
++const RETRY_AFTER_MS = 6_000
++const GIVE_UP_AFTER_MS = 15_000
++
++/**
++ * Pengganti layar "Menunggu data game…" yang dulu bisa menggantung tanpa batas.
++ * Setelah 6 detik meminta ulang state ke server; setelah 15 detik menampilkan pesan
++ * jelas beserta tombol Coba lagi / Muat ulang.
++ */
++export default function GameSyncWaiting() {
++  const [stuck, setStuck] = useState(false)
++
++  useEffect(() => {
++    const t1 = setTimeout(() => {
++      const { sync, connected } = useGameStore.getState()
++      if (sync === 'ok' && connected) requestResume()
++    }, RETRY_AFTER_MS)
++    const t2 = setTimeout(() => setStuck(true), GIVE_UP_AFTER_MS)
++    return () => { clearTimeout(t1); clearTimeout(t2) }
++  }, [])
++
++  return (
++    <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height:'100dvh', background:C.bg, flexDirection:'column', gap:12, padding:24, textAlign:'center' }}>
++      <div style={{ fontSize:32 }}>🃏</div>
++      {!stuck ? (
++        <div style={{ color:C.muted }}>Menunggu data game…</div>
++      ) : (
++        <>
++          <div style={{ color:C.text, fontWeight:600 }}>Data game belum diterima dari server</div>
++          <div style={{ color:C.muted, fontSize:13, maxWidth:300 }}>
++            Koneksi mungkin terganggu atau game sudah tidak tersedia.
++          </div>
++          <div style={{ display:'flex', gap:10, marginTop:6 }}>
++            <button
++              onClick={() => { setStuck(false); requestResume() }}
++              style={{ padding:'10px 16px', borderRadius:8, border:'none', background:C.accent, color:'#fff', fontWeight:600, cursor:'pointer' }}
++            >Coba lagi</button>
++            <button
++              onClick={() => window.location.reload()}
++              style={{ padding:'10px 16px', borderRadius:8, border:`1px solid ${C.border}`, background:'#0f3460', color:C.text, fontWeight:600, cursor:'pointer' }}
++            >Muat ulang</button>
++          </div>
++        </>
++      )}
++    </div>
++  )
++}
+diff --git a/frontend/src/hooks/useSocket.js b/frontend/src/hooks/useSocket.js
+index 307c411..7f749e6 100644
+--- a/frontend/src/hooks/useSocket.js
++++ b/frontend/src/hooks/useSocket.js
+@@ -1,7 +1,11 @@
+-import { useEffect, useRef, useCallback } from 'react'
++import { useEffect, useCallback } from 'react'
+ import { io } from 'socket.io-client'
+ import { useNavigate } from 'react-router-dom'
+ import { useGameStore } from '../store/gameStore'
++import {
++  SYNC_FAIL_AFTER_MS, RESUME_TIMEOUT_MS,
++  routeForRestoredState, messageForSessionNone,
++} from '../utils/session'
+ 
+ const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
+ 
+@@ -11,6 +15,40 @@ function debugLog(action, details = {}) {
+   console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details)
+ }
+ 
++// ── Status sinkronisasi + watchdog ─────────────────────────────────────────
++// Watchdog memastikan pemain tidak menunggu tanpa batas: jika "menghubungkan"
++// atau "memulihkan" tidak selesai tepat waktu, status berubah menjadi 'failed'
++// dan overlay menampilkan pesan serta tombol coba lagi.
++let watchdog = null
++
++function clearWatchdog() {
++  if (watchdog) { clearTimeout(watchdog); watchdog = null }
++}
++
++function armWatchdog(ms, message) {
++  clearWatchdog()
++  watchdog = setTimeout(() => {
++    watchdog = null
++    const { sync, setSync } = useGameStore.getState()
++    if (sync === 'connecting' || sync === 'reconnecting' || sync === 'resuming') {
++      debugLog('SYNC_FAILED', { was: sync })
++      setSync('failed', message)
++    }
++  }, ms)
++}
++
++const MSG_NO_SERVER = 'Tidak bisa terhubung ke server. Periksa koneksi internetmu; sistem terus mencoba di latar belakang.'
++const MSG_NO_RESUME = 'Server tidak merespons saat memulihkan sesi.'
++
++function setSyncStatus(sync, message = null) {
++  useGameStore.getState().setSync(sync, message)
++  if (sync === 'connecting' || sync === 'reconnecting') armWatchdog(SYNC_FAIL_AFTER_MS, MSG_NO_SERVER)
++  else if (sync === 'resuming') armWatchdog(RESUME_TIMEOUT_MS, MSG_NO_RESUME)
++  else clearWatchdog()
++}
++
++// ── API untuk halaman ──────────────────────────────────────────────────────
++
+ // Emit from pages without creating additional socket lifecycle owners.
+ export function emitSocket(event, data) {
+   if (!socketSingleton?.connected) return false
+@@ -18,6 +56,26 @@ export function emitSocket(event, data) {
+   return true
+ }
+ 
++/** Minta server memulihkan sesi (dipakai tombol "Coba lagi" dan layar tunggu game). */
++export function requestResume() {
++  if (!socketSingleton?.connected) return false
++  debugLog('RESUME_REQUESTED')
++  setSyncStatus('resuming')
++  socketSingleton.emit('resume_session')
++  return true
++}
++
++/** Paksa percobaan sambung ulang sekarang (tidak menunggu jeda backoff). */
++export function retryConnection() {
++  const s = socketSingleton
++  if (!s) return false
++  debugLog('RECONNECT_RETRY_CLICKED')
++  if (s.connected) return requestResume()
++  setSyncStatus('reconnecting')
++  s.connect()
++  return true
++}
++
+ export function useSocket() {
+   const navigate = useNavigate()
+   const {
+@@ -31,22 +89,85 @@ export function useSocket() {
+ 
+     socketSingleton = io(SERVER, {
+       auth: { token },
++      forceNew: true,               // manager baru per socket → listener tidak pernah menumpuk
+       reconnection: true,
+-      reconnectionDelay: 1500,
+-      reconnectionAttempts: 10,
++      reconnectionAttempts: Infinity, // tidak menyerah diam-diam; watchdog yang menampilkan kegagalan
++      reconnectionDelay: 1000,
++      reconnectionDelayMax: 5000,
++      timeout: 10000,
+     })
+ 
+     const s = socketSingleton
+ 
+-    s.on('connect',    () => { setConnected(true); debugLog('SOCKET_CONNECTED', { socketId: s.id }) })
+-    s.on('disconnect', (reason) => { setConnected(false); debugLog('SOCKET_DISCONNECTED', { reason }) })
+-    s.on('connect_error', (e) => setError(e.message))
++    // Mulai dari "menghubungkan" hanya bila halaman dimuat ulang dengan token tersimpan
++    // (store sudah memulai dari 'connecting'); setelah login baru tidak ada overlay.
++    if (useGameStore.getState().sync === 'connecting') setSyncStatus('connecting')
++
++    // ── Connection lifecycle ───────────────────────────────────────
++    s.on('connect', () => {
++      setConnected(true)
++      debugLog('SOCKET_CONNECTED', { socketId: s.id })
++      // Setiap (re)connect: minta server memulihkan sesi. Listener ini hanya
++      // didaftarkan sekali per socket, jadi tidak ada duplikasi saat reconnect.
++      if (useGameStore.getState().sync === 'ok') {
++        s.emit('resume_session') // login baru: diam-diam, tanpa overlay
++      } else {
++        setSyncStatus('resuming')
++        s.emit('resume_session')
++      }
++    })
++
++    s.on('disconnect', (reason) => {
++      setConnected(false)
++      debugLog('SOCKET_DISCONNECTED', { reason })
++      if (reason === 'io client disconnect') return // disengaja (logout / cleanup)
++      setSyncStatus('reconnecting')
++      // Server memutus secara sengaja → Socket.IO tidak mencoba lagi otomatis.
++      if (reason === 'io server disconnect') s.connect()
++    })
++
++    s.on('connect_error', (e) => {
++      debugLog('SOCKET_CONNECT_ERROR', { message: e.message, willRetry: s.active })
++      if (e.message === 'INVALID_TOKEN' || e.message === 'AUTH_REQUIRED') {
++        setSyncStatus('auth_failed', 'Sesi login tidak valid atau sudah berakhir. Silakan login ulang.')
++        return
++      }
++      const { sync } = useGameStore.getState()
++      if (sync === 'ok' || sync === 'resuming') setSyncStatus('reconnecting')
++    })
+ 
+     s.on('error', ({ code }) => {
+       setError(code)
+       setTimeout(() => useGameStore.getState().clearError(), 3000)
+     })
+ 
++    // ── Pemulihan sesi (reconnect / refresh) ───────────────────────
++    s.on('session_restored', (state) => {
++      debugLog('SESSION_RESTORED', { roomCode: state?.code, status: state?.status, turn: state?.game?.currentTurn })
++      useGameStore.getState().applyRestoredSession(state)
++      setSyncStatus('ok')
++      navigate(routeForRestoredState(state), { replace: true })
++    })
++
++    s.on('session_none', ({ reason } = {}) => {
++      const st = useGameStore.getState()
++      const hadRoom = !!(st.roomCode || st.roomInfo)
++      debugLog('SESSION_NONE', { reason, hadRoom })
++      if (hadRoom) st.clearRoomState()
++      if (hadRoom || reason === 'EXPIRED' || reason === 'ROOM_CLOSED') {
++        st.setNotice(messageForSessionNone(reason))
++      }
++      // Jangan biarkan pemain tertinggal di halaman yang butuh room.
++      const path = window.location.pathname
++      if (path === '/game' || path === '/result') navigate('/lobby', { replace: true })
++      setSyncStatus('ok')
++    })
++
++    s.on('session_replaced', () => {
++      debugLog('SESSION_REPLACED')
++      setSyncStatus('replaced', 'Akun ini sedang dipakai di tab atau perangkat lain.')
++    })
++
+     // ── Room events ────────────────────────────────────────────────
+     s.on('room_created', ({ code }) => {
+       setRoomCode(code)
+@@ -59,13 +180,6 @@ export function useSocket() {
+       if (state.game) setGameState(state.game)
+     })
+ 
+-    s.on('reconnected', (state) => {
+-      setRoomInfo(state)
+-      setRoomCode(state.code)
+-      if (state.game) setGameState(state.game)
+-      navigate('/game')
+-    })
+-
+     // ── Game events ────────────────────────────────────────────────
+     s.on('game_state', (state) => {
+       setRoomInfo(state)
+@@ -120,8 +234,12 @@ export function useSocket() {
+ 
+     return () => {
+       debugLog('SOCKET_OWNER_CLEANUP', { socketId: s.id })
++      clearWatchdog()
++      if (typeof s.removeAllListeners === 'function') s.removeAllListeners()
++      else s.off()
+       s.disconnect()
+-      socketSingleton = null
++      if (socketSingleton === s) socketSingleton = null
++      useGameStore.getState().setConnected(false)
+     }
+   }, [token])
+ 
+diff --git a/frontend/src/pages/GamePage.jsx b/frontend/src/pages/GamePage.jsx
+index e2e4381..ea54c34 100644
+--- a/frontend/src/pages/GamePage.jsx
++++ b/frontend/src/pages/GamePage.jsx
+@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react'
+ import { useNavigate } from 'react-router-dom'
+ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
++import GameSyncWaiting from '../components/GameSyncWaiting'
+ import { detectCombo, sortHand, comboLabel, cardLabel, SUIT_SYM, IS_RED } from '../utils/comboDetector'
+ 
+ /* ── palette ─────────────────────────────────────────────── */
+@@ -69,12 +70,7 @@ export default function GamePage() {
+     clearSelection()
+   }, [connected, currentRoomCode, myTurn, setError])
+ 
+-  if (!gameState) return (
+-    <div style={{ ...flex('center'), height:'100dvh', background:C.bg, flexDirection:'column', gap:12 }}>
+-      <div style={{ fontSize:32 }}>🃏</div>
+-      <div style={{ color:C.muted }}>Menunggu data game…</div>
+-    </div>
+-  )
++  if (!gameState) return <GameSyncWaiting />
+ 
+   const opponents  = gameState.opponents || []
+   const setScores  = roomInfo?.setScores || {}
+diff --git a/frontend/src/store/gameStore.js b/frontend/src/store/gameStore.js
+index c79ebb2..1fba39b 100644
+--- a/frontend/src/store/gameStore.js
++++ b/frontend/src/store/gameStore.js
+@@ -21,23 +21,50 @@ export const useGameStore = create((set, get) => ({
+   setAuth(user, token) {
+     sessionStorage.setItem('martil_user',  JSON.stringify(user))
+     sessionStorage.setItem('martil_token', JSON.stringify(token))
+-    set({ user, token })
++    set({ user, token, sync: 'ok', syncMessage: null })
+   },
+   logout() {
+     sessionStorage.removeItem('martil_user')
+     sessionStorage.removeItem('martil_token')
+-    set({ user: null, token: null, roomCode: null, roomInfo: null, gameState: null })
++    set({
++      user: null, token: null, roomCode: null, roomInfo: null, gameState: null,
++      currentTurn: null, selectedIds: [], setResult: null, events: [],
++      connected: false, sync: 'ok', syncMessage: null, notice: null,
++    })
+   },
+ 
+   // ── Connection ──────────────────────────────────────────────────
+   connected: false,
+   setConnected: (v) => set({ connected: v }),
+ 
++  // Status sinkronisasi dengan server (dipakai ConnectionOverlay):
++  //   'ok' | 'connecting' | 'reconnecting' | 'resuming' | 'failed' | 'auth_failed' | 'replaced'
++  // Saat halaman dimuat dengan token tersimpan (refresh), mulai dari 'connecting'
++  // supaya pemain langsung melihat "Menghubungkan kembali..." sampai sesi dipulihkan.
++  sync: stored('martil_token') ? 'connecting' : 'ok',
++  syncMessage: null,
++  setSync: (sync, syncMessage = null) => set({ sync, syncMessage }),
++
++  // Pesan singkat (mis. "dikeluarkan dari room") yang ditampilkan ConnectionOverlay.
++  notice: null,
++  setNotice: (notice) => set({ notice }),
++
+   // ── Room ────────────────────────────────────────────────────────
+   roomCode: null,
+   roomInfo: null,
+   setRoomCode: (code) => set({ roomCode: code }),
+   setRoomInfo:  (info) => set({ roomInfo: info }),
++  // Terapkan snapshot lengkap dari server (session_restored): menimpa seluruh state
++  // room/game sekaligus, jadi tidak ada sisa state lama (kartu terpilih, giliran lama, dll).
++  applyRestoredSession: (state) => set({
++    roomCode: state.code,
++    roomInfo: state,
++    gameState: state.game ?? null,
++    currentTurn: state.game?.currentTurn ?? null,
++    selectedIds: [],
++    setResult: state.status === 'done' ? (state.setResult ?? null) : null,
++    error: null,
++  }),
+   clearRoomState: () => set({
+     roomCode: null,
+     roomInfo: null,
+diff --git b/frontend/src/utils/session.js b/frontend/src/utils/session.js
+new file mode 100644
+index 0000000..46db57f
+--- /dev/null
++++ b/frontend/src/utils/session.js
+@@ -0,0 +1,26 @@
++// Konstanta dan helper murni untuk pemulihan sesi (reconnect).
++// Backend adalah sumber kebenaran: klien hanya menampilkan apa yang dikirim server.
++
++/** Berapa lama "Menghubungkan kembali..." boleh berjalan sebelum ditampilkan sebagai gagal. */
++export const SYNC_FAIL_AFTER_MS = 20_000
++/** Berapa lama menunggu jawaban server setelah resume_session sebelum dianggap gagal. */
++export const RESUME_TIMEOUT_MS = 8_000
++
++/** Halaman tujuan setelah server mengirim session_restored. */
++export function routeForRestoredState(state) {
++  if (!state) return '/lobby'
++  if (state.status === 'playing' && state.game) return '/game'
++  if (state.status === 'done' && state.setResult) return '/result'
++  return '/lobby'
++}
++
++/** Pesan untuk pemain ketika sesi tidak bisa dipulihkan. */
++export function messageForSessionNone(reason) {
++  switch (reason) {
++    case 'EXPIRED':     return 'Kamu terputus terlalu lama sehingga dikeluarkan dari room.'
++    case 'ROOM_CLOSED': return 'Room sudah ditutup karena semua pemain terputus terlalu lama.'
++    case 'NO_ROOM':
++    case 'NOT_IN_ROOM': return 'Room tidak ditemukan atau sudah tidak tersedia.'
++    default:            return 'Sesi sebelumnya tidak bisa dipulihkan.'
++  }
++}
+diff --git b/frontend/tests/sync.sim/run.mjs b/frontend/tests/sync.sim/run.mjs
+new file mode 100644
+index 0000000..f975321
+--- /dev/null
++++ b/frontend/tests/sync.sim/run.mjs
+@@ -0,0 +1,123 @@
++import assert from 'node:assert/strict'
++// ── lingkungan browser palsu ──
++const ss = new Map([['martil_token', JSON.stringify('tok')], ['martil_user', JSON.stringify({ id: 'u1' })]])
++globalThis.sessionStorage = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
++globalThis.window = { location: { pathname: '/game' } }
++// ── jam palsu ──
++let now = 0, q = [], idc = 0
++globalThis.setTimeout = (fn, ms) => { const id = ++idc; q.push({ id, at: now + ms, fn }); return id }
++globalThis.clearTimeout = (id) => { q = q.filter(t => t.id !== id) }
++const tick = (ms) => { const end = now + ms; for (;;) { q.sort((a, b) => a.at - b.at); const n = q[0]; if (!n || n.at > end) break; q.shift(); now = n.at; n.fn() } now = end }
++console.info = () => {}
++
++const { sockets } = await import('./stubs/sio.mjs')
++const { navCalls } = await import('./stubs/router.mjs')
++const { reactState } = await import('./stubs/react.mjs')
++const { useGameStore: store } = await import('./store/gameStore.mjs')
++const { useSocket, requestResume, retryConnection } = await import('./hooks/useSocket.mjs')
++
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++const st = () => store.getState()
++const restoredPayload = { code: 'ABC123', status: 'playing', hostId: 'u1', players: [], game: { currentTurn: 'u2', myHand: [{ id: '3D' }], timeLeft: 21000 }, setResult: null }
++
++// S1: boot dengan token (refresh)
++useSocket()
++const s1 = sockets[0]
++t('boot dengan token: status awal "connecting" dan opsi socket aman', () => {
++  assert.equal(st().sync, 'connecting')
++  assert.equal(s1.opts.forceNew, true); assert.equal(s1.opts.reconnectionAttempts, Infinity)
++})
++t('connect → "resuming" dan resume_session dikirim sekali', () => {
++  s1.open()
++  assert.equal(st().sync, 'resuming'); assert.equal(st().connected, true)
++  assert.deepEqual(s1.sent.filter(([e]) => e === 'resume_session').length, 1)
++})
++t('session_restored → state diganti penuh, sync ok, navigasi ke /game', () => {
++  st().toggleCard('X')                                  // sisa pilihan lama
++  s1.fire('session_restored', restoredPayload)
++  assert.equal(st().sync, 'ok'); assert.equal(st().roomCode, 'ABC123')
++  assert.equal(st().currentTurn, 'u2'); assert.deepEqual(st().selectedIds, [])
++  assert.equal(st().gameState.timeLeft, 21000)
++  assert.deepEqual(navCalls.at(-1), ['/game', { replace: true }])
++})
++t('listener tidak ganda: tiap event penting terdaftar tepat sekali', () => {
++  for (const ev of ['connect', 'disconnect', 'session_restored', 'session_none', 'session_replaced', 'game_state', 'turn_changed'])
++    assert.equal(s1.listeners[ev].length, 1, ev)
++})
++
++// S2: koneksi putus lalu pulih
++t('disconnect (transport close) → "reconnecting"; reconnect → resume lagi (tanpa listener baru)', () => {
++  s1.drop('transport close')
++  assert.equal(st().sync, 'reconnecting'); assert.equal(st().connected, false)
++  s1.open()
++  assert.equal(st().sync, 'resuming')
++  assert.equal(s1.sent.filter(([e]) => e === 'resume_session').length, 2)
++  assert.equal(s1.listeners['session_restored'].length, 1)
++  s1.fire('session_restored', { ...restoredPayload, game: { ...restoredPayload.game, currentTurn: 'u3' } })
++  assert.equal(st().sync, 'ok'); assert.equal(st().currentTurn, 'u3')
++})
++t('putus > 20 dtk → "failed" dengan pesan jelas; tersambung lagi → pulih otomatis', () => {
++  s1.drop('ping timeout'); tick(19_000); assert.equal(st().sync, 'reconnecting')
++  tick(2_000); assert.equal(st().sync, 'failed'); assert.match(st().syncMessage, /Tidak bisa terhubung/)
++  s1.open(); assert.equal(st().sync, 'resuming')
++  s1.fire('session_restored', restoredPayload); assert.equal(st().sync, 'ok')
++})
++t('server tidak menjawab resume > 8 dtk → "failed"; requestResume() mencoba lagi', () => {
++  s1.drop('transport close'); s1.open(); tick(9_000)
++  assert.equal(st().sync, 'failed'); assert.match(st().syncMessage, /tidak merespons/)
++  const before = s1.sent.length
++  assert.equal(requestResume(), true); assert.equal(st().sync, 'resuming'); assert.equal(s1.sent.length, before + 1)
++  s1.fire('session_restored', restoredPayload); assert.equal(st().sync, 'ok')
++})
++t('retryConnection saat terputus memanggil socket.connect()', () => {
++  s1.drop('transport close'); const c = s1.connectCalls; retryConnection()
++  assert.equal(s1.connectCalls, c + 1)
++  s1.open(); s1.fire('session_restored', restoredPayload)
++})
++t('disconnect oleh server ("io server disconnect") → connect() manual', () => {
++  const c = s1.connectCalls; s1.drop('io server disconnect'); assert.equal(s1.connectCalls, c + 1)
++  s1.open(); s1.fire('session_restored', restoredPayload)
++})
++
++// S3: sesi tidak bisa dipulihkan
++t('session_none EXPIRED saat di /game → room dibersihkan, notice, kembali ke /lobby', () => {
++  s1.drop('transport close'); s1.open()
++  s1.fire('session_none', { reason: 'EXPIRED' })
++  assert.equal(st().roomCode, null); assert.equal(st().gameState, null)
++  assert.match(st().notice, /dikeluarkan/); assert.equal(st().sync, 'ok')
++  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
++})
++t('session_none NO_ROOM saat login normal (tanpa room) → diam, tanpa notice', () => {
++  st().setNotice(null); navCalls.length = 0; window.location.pathname = '/lobby'
++  s1.fire('session_none', { reason: 'NO_ROOM' })
++  assert.equal(st().notice, null); assert.equal(navCalls.length, 0); assert.equal(st().sync, 'ok')
++})
++
++// S4: akun dipakai tab lain & token invalid
++t('session_replaced → "replaced"; requestResume mengambil alih', () => {
++  s1.fire('session_replaced'); assert.equal(st().sync, 'replaced')
++  requestResume(); assert.equal(st().sync, 'resuming'); s1.fire('session_restored', restoredPayload); assert.equal(st().sync, 'ok')
++})
++t('connect_error INVALID_TOKEN → "auth_failed" (tidak mencoba terus)', () => {
++  s1.fire('connect_error', new Error('INVALID_TOKEN')); assert.equal(st().sync, 'auth_failed')
++  clearAfter()
++})
++function clearAfter() { s1.open(); s1.fire('session_restored', restoredPayload) }
++t('connect_error transport saat "ok" → "reconnecting" (overlay muncul)', () => {
++  s1.fire('connect_error', new Error('xhr poll error')); assert.equal(st().sync, 'reconnecting'); clearAfter()
++})
++
++// S5: cleanup & login ulang tidak menumpuk listener
++t('cleanup melepas listener & socket; hook dijalankan lagi → socket baru, listener tepat satu', () => {
++  reactState.cleanup()
++  assert.equal(s1.disconnected, true); assert.equal(Object.keys(s1.listeners).length, 0); assert.equal(st().connected, false)
++  st().logout(); assert.equal(st().sync, 'ok')
++  st().setAuth({ id: 'u9' }, 'tok2')
++  useSocket(); const s2 = sockets.at(-1)
++  assert.notEqual(s2, s1)
++  for (const ev of ['connect', 'session_restored', 'turn_changed']) assert.equal(s2.listeners[ev].length, 1)
++  // login baru: diam-diam (tanpa overlay), resume tetap dikirim
++  s2.open(); assert.equal(st().sync, 'ok'); assert.equal(s2.sent.filter(([e]) => e === 'resume_session').length, 1)
++})
++console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git b/frontend/tests/sync.sim/run.sh b/frontend/tests/sync.sim/run.sh
+new file mode 100755
+index 0000000..5808287
+--- /dev/null
++++ b/frontend/tests/sync.sim/run.sh
+@@ -0,0 +1,15 @@
++#!/usr/bin/env bash
++# Menguji state machine koneksi klien (useSocket.js + gameStore.js ASLI) dengan socket,
++# react, router, dan timer palsu. Tidak butuh browser maupun node_modules.
++#   bash tests/sync.sim/run.sh      (dari folder frontend)
++set -euo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
++mkdir -p "$OUT/hooks" "$OUT/store" "$OUT/utils" "$OUT/stubs"
++cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"
++for f in hooks/useSocket store/gameStore utils/session; do
++  sed -e "s#from 'zustand'#from '../stubs/zustand.mjs'#" -e "s#from 'react'#from '../stubs/react.mjs'#" \
++      -e "s#from 'socket.io-client'#from '../stubs/sio.mjs'#" -e "s#from 'react-router-dom'#from '../stubs/router.mjs'#" \
++      -e "s#'../store/gameStore'#'../store/gameStore.mjs'#" -e "s#'../utils/session'#'../utils/session.mjs'#" \
++      -e "s#import.meta.env.VITE_SERVER_URL#undefined#" "$SRC/$f.js" > "$OUT/$f.mjs"
++done
++node "$OUT/run.mjs" 2>&1 | grep -v -i warning
+diff --git b/frontend/tests/sync.sim/stubs/react.mjs b/frontend/tests/sync.sim/stubs/react.mjs
+new file mode 100644
+index 0000000..b038581
+--- /dev/null
++++ b/frontend/tests/sync.sim/stubs/react.mjs
+@@ -0,0 +1,3 @@
++export const reactState = { cleanup: null }
++export const useEffect = (fn) => { reactState.cleanup = fn() }
++export const useCallback = (fn) => fn
+diff --git b/frontend/tests/sync.sim/stubs/router.mjs b/frontend/tests/sync.sim/stubs/router.mjs
+new file mode 100644
+index 0000000..70739b5
+--- /dev/null
++++ b/frontend/tests/sync.sim/stubs/router.mjs
+@@ -0,0 +1,2 @@
++export const navCalls = []
++export const useNavigate = () => (to, opts) => navCalls.push([to, opts])
+diff --git b/frontend/tests/sync.sim/stubs/sio.mjs b/frontend/tests/sync.sim/stubs/sio.mjs
+new file mode 100644
+index 0000000..ad52b9a
+--- /dev/null
++++ b/frontend/tests/sync.sim/stubs/sio.mjs
+@@ -0,0 +1,14 @@
++export const sockets = []
++class FakeSocket {
++  constructor(url, opts) { this.opts = opts; this.listeners = {}; this.connected = false; this.id = 'S' + (sockets.length + 1); this.sent = []; this.active = true; this.connectCalls = 0; this.disconnected = false }
++  on(ev, fn) { (this.listeners[ev] ||= []).push(fn) }
++  removeAllListeners() { this.listeners = {} }
++  emit(ev, data) { this.sent.push([ev, data]) }
++  connect() { this.connectCalls++ }
++  disconnect() { this.connected = false; this.disconnected = true }
++  // helpers sisi "server"
++  fire(ev, ...a) { (this.listeners[ev] || []).forEach(f => f(...a)) }
++  open() { this.connected = true; this.fire('connect') }
++  drop(reason) { this.connected = false; this.fire('disconnect', reason) }
++}
++export const io = (url, opts) => { const s = new FakeSocket(url, opts); sockets.push(s); return s }
+diff --git b/frontend/tests/sync.sim/stubs/zustand.mjs b/frontend/tests/sync.sim/stubs/zustand.mjs
+new file mode 100644
+index 0000000..f63e75b
+--- /dev/null
++++ b/frontend/tests/sync.sim/stubs/zustand.mjs
+@@ -0,0 +1,5 @@
++export const create = (init) => {
++  let state; const set = (p) => { state = { ...state, ...(typeof p === 'function' ? p(state) : p) } }; const get = () => state
++  state = init(set, get)
++  const hook = (sel) => (sel ? sel(state) : state); hook.getState = get; hook.setState = set; return hook
++}

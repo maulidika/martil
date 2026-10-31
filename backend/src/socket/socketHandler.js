@@ -10,7 +10,10 @@ function debugLog(action, details = {}) {
   console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details);
 }
 
-module.exports = function registerSocketHandlers(io) {
+const SWEEP_INTERVAL_MS = 10_000;
+
+module.exports = function registerSocketHandlers(io, opts = {}) {
+  const sweepIntervalMs = opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
 
   // ── Auth middleware ──────────────────────────────────────────────────────
   io.use((socket, next) => {
@@ -33,6 +36,7 @@ module.exports = function registerSocketHandlers(io) {
       const result = rm.createRoom(userId, maxGames);
       if (!result.ok) return socket.emit('error', { code: result.error });
 
+      rm.bindSocket(result.room.code, userId, socket.id);
       socket.join(result.room.code);
       socket.emit('room_created', { code: result.room.code });
       socket.emit('room_updated', rm.publicState(result.room.code, userId));
@@ -43,27 +47,25 @@ module.exports = function registerSocketHandlers(io) {
       const room = rm.getRoom(roomCode);
       if (!room) return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
 
-      // Reconnect path
-      const existing = room.players.find(p => p.id === userId);
-      if (existing && !existing.connected) {
-        const result = rm.reconnect(roomCode, userId);
-        if (!result.ok) return socket.emit('error', { code: result.error });
-
-        socket.join(roomCode);
-        socket.emit('reconnected', rm.publicState(roomCode, userId));
-        socket.to(roomCode).emit('player_reconnected', { playerId: userId });
-        return;
+      // Pemain sudah menjadi anggota room ini → pulihkan sesi (bukan join baru)
+      if (room.players.some(p => p.id === userId)) {
+        return resumeFor(socket, roomCode);
       }
 
       // Fresh join
       const result = rm.joinRoom(roomCode, userId);
       if (!result.ok) return socket.emit('error', { code: result.error });
 
+      rm.bindSocket(roomCode, userId, socket.id);
       socket.join(roomCode);
       socket.emit('room_updated', rm.publicState(roomCode, userId));
       // Tell everyone (including new player) about the updated room
       io.to(roomCode).emit('room_updated', rm.publicState(roomCode, userId));
     });
+
+    // ── resume_session ─────────────────────────────────────────────────────
+    // Dikirim klien setiap kali socket tersambung (login, refresh, atau reconnect).
+    socket.on('resume_session', () => resumeFor(socket));
 
     // ── leave_room (available after a completed set) ──────────────────────
     socket.on('leave_room', ({ roomCode } = {}) => {
@@ -92,6 +94,7 @@ module.exports = function registerSocketHandlers(io) {
 
     // ── start_game ─────────────────────────────────────────────────────────
     socket.on('start_game', ({ roomCode }) => {
+      if (!requireInRoom(socket, roomCode)) return;
       const room = rm.getRoom(roomCode);
       if (!room)                   return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
       if (room.hostId !== userId)  return socket.emit('error', { code: 'NOT_HOST' });
@@ -110,6 +113,7 @@ module.exports = function registerSocketHandlers(io) {
 
     // ── play_cards ─────────────────────────────────────────────────────────
     socket.on('play_cards', ({ roomCode, cardIds }) => {
+      if (!requireInRoom(socket, roomCode)) return;
       clearTimer(roomCode);
 
       const result = rm.processPlay(roomCode, userId, cardIds);
@@ -132,6 +136,7 @@ module.exports = function registerSocketHandlers(io) {
 
     // ── skip_turn ──────────────────────────────────────────────────────────
     socket.on('skip_turn', ({ roomCode }) => {
+      if (!requireInRoom(socket, roomCode)) return;
       clearTimer(roomCode);
 
       const result = rm.processSkip(roomCode, userId);
@@ -153,15 +158,92 @@ module.exports = function registerSocketHandlers(io) {
     });
 
     // ── disconnect ─────────────────────────────────────────────────────────
+    // Hanya socket yang masih menjadi socket aktif pemain yang dihitung sebagai terputus.
     socket.on('disconnecting', (reason) => {
-      debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms] });
+      debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms].filter(r => r !== socket.id) });
       for (const roomCode of socket.rooms) {
         if (roomCode === socket.id) continue;
-        rm.markDisconnected(roomCode, userId);
-        socket.to(roomCode).emit('player_disconnected', { playerId: userId });
+        const changed = rm.markDisconnected(roomCode, userId, socket.id);
+        if (changed) {
+          socket.to(roomCode).emit('player_disconnected', { playerId: userId });
+          debugLog('PLAYER_DISCONNECTED', { roomCode, userId, socketId: socket.id });
+        } else {
+          debugLog('DISCONNECT_IGNORED', { roomCode, userId, socketId: socket.id, why: 'socket sudah digantikan atau pemain sudah terputus' });
+        }
       }
     });
   });
+
+  // ── Session resume ─────────────────────────────────────────────────────────
+
+  function requireInRoom(socket, roomCode) {
+    if (roomCode && socket.rooms.has(roomCode)) return true;
+    socket.emit('error', { code: 'NOT_IN_ROOM' });
+    return false;
+  }
+
+  function resumeFor(socket, hintCode = null) {
+    const userId = socket.user.id;
+    const r = rm.resumeSession(userId, socket.id, Date.now(), hintCode);
+    if (r.events?.length) broadcastRoomEvents(r.events);
+
+    if (!r.ok) {
+      if (r.error !== 'NO_ROOM') debugLog('SESSION_RESUME_REJECTED', { userId, socketId: socket.id, reason: r.error });
+      socket.emit('session_none', { reason: r.error });
+      return;
+    }
+
+    const { room } = r;
+    const code = room.code;
+
+    // Satu pemain = satu socket aktif per room: socket lain milik akun yang sama dilepas dari room.
+    let replaced = 0;
+    for (const [, other] of io.sockets.sockets) {
+      if (other.id === socket.id || other.user?.id !== userId || !other.rooms.has(code)) continue;
+      other.leave(code);
+      other.emit('session_replaced', { roomCode: code });
+      replaced += 1;
+    }
+
+    socket.join(code);
+    socket.emit('session_restored', { ...rm.publicState(code, userId), setResult: room.setResult || null });
+    if (r.wasDisconnected) socket.to(code).emit('player_reconnected', { playerId: userId });
+
+    debugLog('SESSION_RESTORED', {
+      userId, roomCode: code, status: room.status, socketId: socket.id,
+      wasDisconnected: r.wasDisconnected, replacedSockets: replaced,
+      game: room.currentGame ? { gameNumber: room.currentGame.gameNumber, currentTurn: room.currentGame.currentTurn } : null,
+    });
+  }
+
+  // ── Sweeper: kadaluarsakan pemain terputus & tutup room yang ditinggalkan ──
+
+  function broadcastRoomEvents(events) {
+    const touched = new Set();
+    for (const e of events) {
+      debugLog(`ROOM_${e.type.toUpperCase()}`, e);
+      if (e.type === 'room_deleted' || e.type === 'room_abandoned') clearTimer(e.code);
+      else touched.add(e.code);
+    }
+    for (const code of touched) {
+      const room = rm.getRoom(code);
+      if (!room) continue;
+      if (room.status === 'playing') emitPrivateStates(io, code, room);
+      else io.to(code).emit('room_updated', rm.publicState(code, null));
+    }
+  }
+
+  function sweep(now = Date.now()) {
+    const events = rm.sweepExpired(now);
+    if (events.length) broadcastRoomEvents(events);
+    return events;
+  }
+
+  let sweepTimer = null;
+  if (sweepIntervalMs > 0) {
+    sweepTimer = setInterval(() => sweep(), sweepIntervalMs);
+    sweepTimer.unref?.();
+  }
 
   // ── Timer helpers ──────────────────────────────────────────────────────────
 
@@ -171,11 +253,12 @@ module.exports = function registerSocketHandlers(io) {
     if (!room?.currentGame) return;
 
     const handle = setTimeout(() => {
+      const skippedId = rm.getRoom(roomCode)?.currentGame?.currentTurn ?? null; // sebelum giliran berpindah
       const autoResult = rm.processAutoSkip(roomCode);
       if (!autoResult) return;
 
       const { event, room } = autoResult;
-      const skippedId = room.currentGame?.currentTurn ?? null;
+      debugLog('AUTO_SKIP', { roomCode, playerId: skippedId, result: event.type });
       io.to(roomCode).emit('auto_skipped', { playerId: skippedId });
 
       if (event.type === 'rally_ended') {
@@ -220,6 +303,7 @@ module.exports = function registerSocketHandlers(io) {
       setTimeout(() => {
         const fresh = rm.getRoom(roomCode);
         if (!fresh?.currentGame) return;
+        rm.restartTurnClock(roomCode); // timeLeft yang dikirim harus sama dengan timer server (30 dtk penuh)
         emitPrivateStates(io, roomCode, fresh);
         io.to(roomCode).emit('game_started', {
           gameNumber:  event.nextGame,
@@ -240,4 +324,6 @@ module.exports = function registerSocketHandlers(io) {
       socket.emit('game_state', rm.publicState(roomCode, uid));
     }
   }
+
+  return { sweep, stop() { if (sweepTimer) clearInterval(sweepTimer); } };
 };

@@ -6,6 +6,7 @@ import LoginPage  from './pages/LoginPage'
 import LobbyPage  from './pages/LobbyPage'
 import GamePage   from './pages/GamePage'
 import ResultPage from './pages/ResultPage'
+import ConnectionOverlay from './components/ConnectionOverlay'
 
 function PrivateRoute({ children }) {
   const user = useGameStore(s => s.user)
@@ -19,6 +20,7 @@ export default function App() {
   useSocket()
 
   return (
+    <>
     <Routes>
       <Route path="/login" element={user ? <Navigate to="/lobby" replace /> : <LoginPage />} />
       <Route path="/lobby" element={<PrivateRoute><LobbyPage /></PrivateRoute>} />
@@ -26,5 +28,7 @@ export default function App() {
       <Route path="/result" element={<PrivateRoute><ResultPage /></PrivateRoute>} />
       <Route path="*" element={<Navigate to={user ? '/lobby' : '/login'} replace />} />
     </Routes>
+    <ConnectionOverlay />
+    </>
   )
 }

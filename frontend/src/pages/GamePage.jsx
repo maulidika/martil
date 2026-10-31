@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
 import { emitSocket } from '../hooks/useSocket'
+import GameSyncWaiting from '../components/GameSyncWaiting'
 import { detectCombo, sortHand, comboLabel, cardLabel, SUIT_SYM, IS_RED } from '../utils/comboDetector'
 
 /* ── palette ─────────────────────────────────────────────── */
@@ -69,12 +70,7 @@ export default function GamePage() {
     clearSelection()
   }, [connected, currentRoomCode, myTurn, setError])
 
-  if (!gameState) return (
-    <div style={{ ...flex('center'), height:'100dvh', background:C.bg, flexDirection:'column', gap:12 }}>
-      <div style={{ fontSize:32 }}>🃏</div>
-      <div style={{ color:C.muted }}>Menunggu data game…</div>
-    </div>
-  )
+  if (!gameState) return <GameSyncWaiting />
 
   const opponents  = gameState.opponents || []
   const setScores  = roomInfo?.setScores || {}

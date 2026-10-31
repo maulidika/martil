@@ -9,7 +9,12 @@ const { db } = require('../db/database');
 // Completed results are persisted to SQLite.
 const rooms = new Map(); // roomCode → roomState
 
-const RECONNECT_WINDOW_MS = 60_000;
+const RECONNECT_WINDOW_MS  = 60_000;       // batas pemain terputus sebelum dikeluarkan (room waiting/done)
+const ABANDONED_ROOM_MS    = 10 * 60_000;  // semua pemain terputus selama ini → room dianggap ditinggalkan
+const REMOVAL_MEMORY_MS    = 10 * 60_000;  // berapa lama alasan "dikeluarkan" diingat untuk resume berikutnya
+
+// userId → { code, reason, at } — agar pemain yang kembali setelah dikeluarkan mendapat pesan yang jelas
+const removals = new Map();
 
 // ─── Room creation & joining ─────────────────────────────────────────────────
 
@@ -23,7 +28,7 @@ function createRoom(hostId, maxGames = 4) {
     hostId,
     maxGames,
     status: 'waiting',
-    players: [{ id: hostId, connected: true, disconnectedAt: null }],
+    players: [{ id: hostId, connected: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() }],
     setId: null,
     setScores: {},
     currentGame: null,
@@ -47,7 +52,7 @@ function joinRoom(code, playerId) {
   if (room.players.length >= 4)                    return { ok: false, error: 'ROOM_FULL' };
   if (room.players.find(p => p.id === playerId))   return { ok: false, error: 'ALREADY_IN_ROOM' };
 
-  room.players.push({ id: playerId, connected: true, disconnectedAt: null });
+  room.players.push({ id: playerId, connected: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
   return { ok: true, room };
 }
 
@@ -157,6 +162,8 @@ function _handleGameOver(room, event) {
     event.setOver    = true;
     event.rankings   = rankings;
     event.setScores  = room.setScores;
+    // Disimpan agar pemain yang refresh/reconnect di Scoreboard bisa melihat hasil yang sama.
+    room.setResult   = { rankings, setScores: { ...room.setScores } };
   } else {
     // Next game — winner leads
     room.currentGame = GameEngine.initGame(
@@ -187,32 +194,143 @@ function leaveRoom(code, playerId) {
   return { ok: true, room, roomDeleted };
 }
 
-function markDisconnected(code, playerId) {
+function markDisconnected(code, playerId, socketId = null, now = Date.now()) {
   const room = rooms.get(code);
-  if (!room) return;
+  if (!room) return false;
   const p = room.players.find(p => p.id === playerId);
-  if (p) { p.connected = false; p.disconnectedAt = Date.now(); }
+  if (!p || !p.connected) return false;
 
-  // Migrate host if needed
-  if (room.hostId === playerId) {
-    const next = room.players.find(p => p.id !== playerId && p.connected);
-    if (next) room.hostId = next.id;
-  }
+  // Socket lama yang telat putus (refresh / tab lain) tidak boleh menandai
+  // pemain yang sudah terikat ke socket yang lebih baru sebagai terputus.
+  if (socketId && p.socketId && p.socketId !== socketId) return false;
+
+  p.connected = false;
+  p.disconnectedAt = now;
+  // Perpindahan host sengaja ditunda sampai batas reconnect lewat (lihat _expireRoom),
+  // supaya host yang hanya refresh tidak kehilangan perannya.
+  return true;
 }
 
-function reconnect(code, playerId) {
+/** Ikat socket aktif ke pemain (dipanggil saat create/join room). */
+function bindSocket(code, playerId, socketId) {
   const room = rooms.get(code);
-  if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
-
-  const p = room.players.find(p => p.id === playerId);
-  if (!p) return { ok: false, error: 'NOT_IN_ROOM' };
-
-  const elapsed = Date.now() - (p.disconnectedAt || 0);
-  if (elapsed > RECONNECT_WINDOW_MS) return { ok: false, error: 'RECONNECT_EXPIRED' };
-
+  const p = room?.players.find(p => p.id === playerId);
+  if (!p) return false;
+  p.socketId = socketId;
   p.connected = true;
   p.disconnectedAt = null;
-  return { ok: true, room };
+  return true;
+}
+
+/** Cari room tempat pemain menjadi anggota. Game yang sedang berjalan didahulukan. */
+function findRoomByPlayer(userId, hintCode = null) {
+  if (hintCode) {
+    const hinted = rooms.get(hintCode);
+    if (hinted?.players.some(p => p.id === userId)) return hinted;
+  }
+  let best = null;
+  let bestJoined = -1;
+  for (const room of rooms.values()) {
+    const p = room.players.find(p => p.id === userId);
+    if (!p) continue;
+    if (room.status === 'playing') return room;
+    if (p.joinedAt > bestJoined) { best = room; bestJoined = p.joinedAt; }
+  }
+  return best;
+}
+
+/**
+ * Hapus pemain yang terputus melebihi batas waktu (room waiting/done) dan
+ * pindahkan host bila perlu. Return daftar event untuk di-broadcast.
+ * Pemain di game yang sedang berjalan TIDAK dihapus (kursi dipertahankan).
+ */
+function _expireRoom(room, now) {
+  const events = [];
+  const code = room.code;
+
+  if (room.status === 'waiting' || room.status === 'done') {
+    for (const p of [...room.players]) {
+      if (!p.connected && p.disconnectedAt != null && now - p.disconnectedAt > RECONNECT_WINDOW_MS) {
+        room.players.splice(room.players.indexOf(p), 1);
+        removals.set(p.id, { code, reason: 'EXPIRED', at: now });
+        events.push({ type: 'player_expired', code, playerId: p.id });
+      }
+    }
+    if (room.players.length === 0) {
+      rooms.delete(code);
+      events.push({ type: 'room_deleted', code });
+      return events;
+    }
+  }
+
+  const host = room.players.find(p => p.id === room.hostId);
+  const hostGone = !host || (!host.connected && host.disconnectedAt != null && now - host.disconnectedAt > RECONNECT_WINDOW_MS);
+  if (hostGone) {
+    const next = room.players.find(p => p.connected && p.id !== room.hostId) || (!host ? room.players[0] : null);
+    if (next && next.id !== room.hostId) {
+      room.hostId = next.id;
+      events.push({ type: 'host_changed', code, hostId: next.id });
+    }
+  }
+  return events;
+}
+
+/** Dipanggil periodik: kadaluarsakan pemain terputus dan tutup room yang ditinggalkan. */
+function sweepExpired(now = Date.now()) {
+  const events = [];
+  for (const room of [...rooms.values()]) {
+    const allGone = room.players.length > 0 && room.players.every(p => !p.connected);
+    if (allGone) {
+      const lastSeen = Math.max(...room.players.map(p => p.disconnectedAt ?? 0));
+      if (now - lastSeen > ABANDONED_ROOM_MS) {
+        for (const p of room.players) removals.set(p.id, { code: room.code, reason: 'ROOM_CLOSED', at: now });
+        rooms.delete(room.code);
+        events.push({ type: 'room_abandoned', code: room.code });
+        continue;
+      }
+    }
+    events.push(..._expireRoom(room, now));
+  }
+  for (const [id, r] of removals) if (now - r.at > REMOVAL_MEMORY_MS) removals.delete(id);
+  return events;
+}
+
+/**
+ * Pulihkan sesi pemain (refresh / koneksi putus / login di tab baru).
+ * Tidak membuat room atau game baru dan tidak mengacak kartu: hanya mengikat
+ * socket baru ke keanggotaan yang sudah ada.
+ */
+function resumeSession(userId, socketId, now = Date.now(), hintCode = null) {
+  const room = findRoomByPlayer(userId, hintCode);
+  if (!room) {
+    const rem = removals.get(userId);
+    if (rem && now - rem.at <= REMOVAL_MEMORY_MS) {
+      removals.delete(userId);
+      return { ok: false, error: rem.reason, events: [] };
+    }
+    return { ok: false, error: 'NO_ROOM', events: [] };
+  }
+
+  const events = _expireRoom(room, now);
+  const p = room.players.find(p => p.id === userId);
+  if (!p) {
+    const rem = removals.get(userId);
+    removals.delete(userId);
+    return { ok: false, error: rem?.reason || 'NOT_IN_ROOM', events };
+  }
+
+  const wasDisconnected = !p.connected;
+  const previousSocketId = p.socketId;
+  p.connected = true;
+  p.disconnectedAt = null;
+  p.socketId = socketId;
+  return { ok: true, room, wasDisconnected, previousSocketId, events };
+}
+
+/** Mulai ulang jam giliran (dipakai setelah jeda antar-game agar timeLeft sama dengan timer server). */
+function restartTurnClock(code) {
+  const room = rooms.get(code);
+  if (room?.currentGame) room.currentGame.turnStartedAt = Date.now();
 }
 
 // ─── Public view ─────────────────────────────────────────────────────────────
@@ -245,4 +363,8 @@ function generateCode() {
   return code;
 }
 
-module.exports = { createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip, leaveRoom, markDisconnected, reconnect, publicState };
+module.exports = {
+  createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip,
+  leaveRoom, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
+  restartTurnClock, publicState, RECONNECT_WINDOW_MS,
+};

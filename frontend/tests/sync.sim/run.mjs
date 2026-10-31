@@ -1,0 +1,123 @@
+import assert from 'node:assert/strict'
+// ── lingkungan browser palsu ──
+const ss = new Map([['martil_token', JSON.stringify('tok')], ['martil_user', JSON.stringify({ id: 'u1' })]])
+globalThis.sessionStorage = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
+globalThis.window = { location: { pathname: '/game' } }
+// ── jam palsu ──
+let now = 0, q = [], idc = 0
+globalThis.setTimeout = (fn, ms) => { const id = ++idc; q.push({ id, at: now + ms, fn }); return id }
+globalThis.clearTimeout = (id) => { q = q.filter(t => t.id !== id) }
+const tick = (ms) => { const end = now + ms; for (;;) { q.sort((a, b) => a.at - b.at); const n = q[0]; if (!n || n.at > end) break; q.shift(); now = n.at; n.fn() } now = end }
+console.info = () => {}
+
+const { sockets } = await import('./stubs/sio.mjs')
+const { navCalls } = await import('./stubs/router.mjs')
+const { reactState } = await import('./stubs/react.mjs')
+const { useGameStore: store } = await import('./store/gameStore.mjs')
+const { useSocket, requestResume, retryConnection } = await import('./hooks/useSocket.mjs')
+
+let pass = 0, fail = 0
+const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
+const st = () => store.getState()
+const restoredPayload = { code: 'ABC123', status: 'playing', hostId: 'u1', players: [], game: { currentTurn: 'u2', myHand: [{ id: '3D' }], timeLeft: 21000 }, setResult: null }
+
+// S1: boot dengan token (refresh)
+useSocket()
+const s1 = sockets[0]
+t('boot dengan token: status awal "connecting" dan opsi socket aman', () => {
+  assert.equal(st().sync, 'connecting')
+  assert.equal(s1.opts.forceNew, true); assert.equal(s1.opts.reconnectionAttempts, Infinity)
+})
+t('connect → "resuming" dan resume_session dikirim sekali', () => {
+  s1.open()
+  assert.equal(st().sync, 'resuming'); assert.equal(st().connected, true)
+  assert.deepEqual(s1.sent.filter(([e]) => e === 'resume_session').length, 1)
+})
+t('session_restored → state diganti penuh, sync ok, navigasi ke /game', () => {
+  st().toggleCard('X')                                  // sisa pilihan lama
+  s1.fire('session_restored', restoredPayload)
+  assert.equal(st().sync, 'ok'); assert.equal(st().roomCode, 'ABC123')
+  assert.equal(st().currentTurn, 'u2'); assert.deepEqual(st().selectedIds, [])
+  assert.equal(st().gameState.timeLeft, 21000)
+  assert.deepEqual(navCalls.at(-1), ['/game', { replace: true }])
+})
+t('listener tidak ganda: tiap event penting terdaftar tepat sekali', () => {
+  for (const ev of ['connect', 'disconnect', 'session_restored', 'session_none', 'session_replaced', 'game_state', 'turn_changed'])
+    assert.equal(s1.listeners[ev].length, 1, ev)
+})
+
+// S2: koneksi putus lalu pulih
+t('disconnect (transport close) → "reconnecting"; reconnect → resume lagi (tanpa listener baru)', () => {
+  s1.drop('transport close')
+  assert.equal(st().sync, 'reconnecting'); assert.equal(st().connected, false)
+  s1.open()
+  assert.equal(st().sync, 'resuming')
+  assert.equal(s1.sent.filter(([e]) => e === 'resume_session').length, 2)
+  assert.equal(s1.listeners['session_restored'].length, 1)
+  s1.fire('session_restored', { ...restoredPayload, game: { ...restoredPayload.game, currentTurn: 'u3' } })
+  assert.equal(st().sync, 'ok'); assert.equal(st().currentTurn, 'u3')
+})
+t('putus > 20 dtk → "failed" dengan pesan jelas; tersambung lagi → pulih otomatis', () => {
+  s1.drop('ping timeout'); tick(19_000); assert.equal(st().sync, 'reconnecting')
+  tick(2_000); assert.equal(st().sync, 'failed'); assert.match(st().syncMessage, /Tidak bisa terhubung/)
+  s1.open(); assert.equal(st().sync, 'resuming')
+  s1.fire('session_restored', restoredPayload); assert.equal(st().sync, 'ok')
+})
+t('server tidak menjawab resume > 8 dtk → "failed"; requestResume() mencoba lagi', () => {
+  s1.drop('transport close'); s1.open(); tick(9_000)
+  assert.equal(st().sync, 'failed'); assert.match(st().syncMessage, /tidak merespons/)
+  const before = s1.sent.length
+  assert.equal(requestResume(), true); assert.equal(st().sync, 'resuming'); assert.equal(s1.sent.length, before + 1)
+  s1.fire('session_restored', restoredPayload); assert.equal(st().sync, 'ok')
+})
+t('retryConnection saat terputus memanggil socket.connect()', () => {
+  s1.drop('transport close'); const c = s1.connectCalls; retryConnection()
+  assert.equal(s1.connectCalls, c + 1)
+  s1.open(); s1.fire('session_restored', restoredPayload)
+})
+t('disconnect oleh server ("io server disconnect") → connect() manual', () => {
+  const c = s1.connectCalls; s1.drop('io server disconnect'); assert.equal(s1.connectCalls, c + 1)
+  s1.open(); s1.fire('session_restored', restoredPayload)
+})
+
+// S3: sesi tidak bisa dipulihkan
+t('session_none EXPIRED saat di /game → room dibersihkan, notice, kembali ke /lobby', () => {
+  s1.drop('transport close'); s1.open()
+  s1.fire('session_none', { reason: 'EXPIRED' })
+  assert.equal(st().roomCode, null); assert.equal(st().gameState, null)
+  assert.match(st().notice, /dikeluarkan/); assert.equal(st().sync, 'ok')
+  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
+})
+t('session_none NO_ROOM saat login normal (tanpa room) → diam, tanpa notice', () => {
+  st().setNotice(null); navCalls.length = 0; window.location.pathname = '/lobby'
+  s1.fire('session_none', { reason: 'NO_ROOM' })
+  assert.equal(st().notice, null); assert.equal(navCalls.length, 0); assert.equal(st().sync, 'ok')
+})
+
+// S4: akun dipakai tab lain & token invalid
+t('session_replaced → "replaced"; requestResume mengambil alih', () => {
+  s1.fire('session_replaced'); assert.equal(st().sync, 'replaced')
+  requestResume(); assert.equal(st().sync, 'resuming'); s1.fire('session_restored', restoredPayload); assert.equal(st().sync, 'ok')
+})
+t('connect_error INVALID_TOKEN → "auth_failed" (tidak mencoba terus)', () => {
+  s1.fire('connect_error', new Error('INVALID_TOKEN')); assert.equal(st().sync, 'auth_failed')
+  clearAfter()
+})
+function clearAfter() { s1.open(); s1.fire('session_restored', restoredPayload) }
+t('connect_error transport saat "ok" → "reconnecting" (overlay muncul)', () => {
+  s1.fire('connect_error', new Error('xhr poll error')); assert.equal(st().sync, 'reconnecting'); clearAfter()
+})
+
+// S5: cleanup & login ulang tidak menumpuk listener
+t('cleanup melepas listener & socket; hook dijalankan lagi → socket baru, listener tepat satu', () => {
+  reactState.cleanup()
+  assert.equal(s1.disconnected, true); assert.equal(Object.keys(s1.listeners).length, 0); assert.equal(st().connected, false)
+  st().logout(); assert.equal(st().sync, 'ok')
+  st().setAuth({ id: 'u9' }, 'tok2')
+  useSocket(); const s2 = sockets.at(-1)
+  assert.notEqual(s2, s1)
+  for (const ev of ['connect', 'session_restored', 'turn_changed']) assert.equal(s2.listeners[ev].length, 1)
+  // login baru: diam-diam (tanpa overlay), resume tetap dikirim
+  s2.open(); assert.equal(st().sync, 'ok'); assert.equal(s2.sent.filter(([e]) => e === 'resume_session').length, 1)
+})
+console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)

@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "jest"
+    "test": "jest",
+    "test:sim": "node tests/reconnect.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

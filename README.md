@@ -202,6 +202,35 @@ Poin terkecil = Juara 1. Contoh pembagian hasil: +5k / +3k / -3k / -5k
 
 ---
 
+## 🔌 Reconnect & Pemulihan Sesi
+
+Backend adalah sumber kebenaran. Setiap kali socket tersambung (login, refresh, atau reconnect otomatis), klien mengirim `resume_session`; server mencari room pemain berdasarkan akun (bukan kode room) dan membalas:
+
+| Event server → klien | Arti |
+|---|---|
+| `session_restored` | Snapshot lengkap (status room, kartu, giliran, meja, `timeLeft`, `setResult` bila Scoreboard). Klien menimpa seluruh state lalu pindah ke `/lobby`, `/game`, atau `/result` sesuai status. |
+| `session_none` `{reason}` | Tidak ada sesi: `NO_ROOM`, `EXPIRED` (terputus > 60 dtk di room waiting/done), atau `ROOM_CLOSED` (semua pemain terputus > 10 menit). |
+| `session_replaced` | Akun yang sama mengambil alih dari tab/perangkat lain. Tab lama melihat overlay dengan tombol "Pakai di tab ini". |
+| `player_disconnected` / `player_reconnected` | Hanya dikirim ke pemain lain; resume tidak mengirim ulang kartu atau state ke mereka. |
+
+Aturan server:
+- Satu pemain punya satu socket aktif per room; disconnect dari socket lama tidak menandai pemain terputus.
+- `start_game`, `play_cards`, `skip_turn` ditolak (`NOT_IN_ROOM`) dari socket yang belum dipulihkan.
+- Room `waiting`/`done`: pemain terputus > 60 dtk dikeluarkan dan host berpindah ke pemain terhubung. Room `playing`: kursi dipertahankan (giliran yang lewat di-auto-skip) sampai pemain kembali.
+- Pembersih berjalan tiap 10 detik; room yang ditinggalkan semua pemain > 10 menit ditutup beserta timernya.
+
+Di klien, `ConnectionOverlay` menampilkan "Menghubungkan kembali..." dan berubah menjadi pesan gagal + tombol *Coba lagi* bila lebih dari 20 detik (atau 8 detik tanpa jawaban resume). Layar "Menunggu data game…" tidak lagi menggantung: setelah 6 detik meminta ulang state, setelah 15 detik menampilkan pesan dan tombol.
+
+Log penting (backend, awalan `[MARTIL ...]`): `SOCKET_CONNECTED`, `SOCKET_DISCONNECTING`, `PLAYER_DISCONNECTED`, `DISCONNECT_IGNORED`, `SESSION_RESTORED`, `SESSION_RESUME_REJECTED`, `ROOM_PLAYER_EXPIRED`, `ROOM_HOST_CHANGED`, `ROOM_ROOM_ABANDONED`, `AUTO_SKIP`. Di console browser: `SOCKET_CONNECTED/DISCONNECTED`, `SESSION_RESTORED`, `SESSION_NONE`, `SESSION_REPLACED`, `SYNC_FAILED`.
+
+Uji otomatis (tanpa browser, tanpa WebSocket asli):
+```bash
+cd backend  && npm run test:sim        # server: protokol resume, timer, host, kadaluarsa
+cd frontend && bash tests/sync.sim/run.sh   # klien: state machine koneksi
+```
+
+---
+
 ## 🐛 Troubleshooting
 
 **Port sudah dipakai?**
