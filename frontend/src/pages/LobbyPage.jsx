@@ -27,7 +27,7 @@ const s = {
 
 export default function LobbyPage() {
   const navigate  = useNavigate()
-  const { user, token, roomCode, roomInfo, logout, events } = useGameStore()
+  const { user, token, roomCode, roomInfo, logout, events, setResult } = useGameStore()
   const [joinInput, setJoinInput] = useState('')
   const [maxGames, setMaxGames]   = useState(4)
   const [localErr, setLocalErr]   = useState('')
@@ -44,6 +44,19 @@ export default function LobbyPage() {
   // Setelah set selesai, semua pemain harus kembali ke Room (Back to Room) sebelum host bisa memulai.
   const allBack = players.every(p => p.inRoom !== false)
   const ready = players.length === 4 && allBack
+
+  // Pengaman: pemain yang belum menekan Back to Room (inRoom=false) dan masih punya hasil set
+  // seharusnya berada di Scoreboard, bukan di Room. Berlaku untuk jalur apa pun yang membawanya ke sini
+  // (mis. refresh): dipulangkan ke /result dengan hasil dari server.
+  const me = players.find(p => p.id === user?.id)
+  useEffect(() => {
+    if (!myRoom || !me || me.inRoom !== false) return
+    const result = setResult || myRoom.setResult
+    if (!result) return
+    console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom.code })
+    if (!setResult) useGameStore.getState().setSetResult(result)
+    navigate('/result', { replace: true })
+  }, [myRoom?.code, me?.inRoom, !!setResult])
 
   // Exit Room gagal → aktifkan kembali tombol dan tampilkan pesan.
   useEffect(() => {

@@ -100,3 +100,16 @@ export function comboLabel(combo) {
   }
   return ''
 }
+
+// Urutan tampil kartu sebuah kombinasi di meja (hanya tampilan; kartu di tangan, data server,
+// dan aturan tidak berubah). Straight rendah ditulis menurut urutan mainnya:
+// A-2-3-4-5 dan 2-3-4-5-6, bukan 3-4-5-A-2 / 3-4-5-6-2 (urutan tangan di mana 2 tertinggi).
+const LOW_STRAIGHT_DISPLAY = [['A', '2', '3', '4', '5'], ['2', '3', '4', '5', '6']]
+
+export function displayOrder(combo) {
+  const cards = combo?.cards || []
+  if (combo?.type !== 'paketan' || (combo.subtype !== 'straight' && combo.subtype !== 'straightflush')) return cards
+  const ranks = new Set(cards.map(c => c.rank))
+  const written = LOW_STRAIGHT_DISPLAY.find(seq => ranks.size === 5 && seq.every(r => ranks.has(r)))
+  return written ? written.map(r => cards.find(c => c.rank === r)) : cards
+}

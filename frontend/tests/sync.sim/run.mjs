@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 // ── lingkungan browser palsu ──
 const ss = new Map([['martil_token', JSON.stringify('tok')], ['martil_user', JSON.stringify({ id: 'u1' })]])
 globalThis.sessionStorage = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
@@ -109,15 +110,62 @@ t('connect_error transport saat "ok" → "reconnecting" (overlay muncul)', () =>
 })
 
 // S5: cleanup & login ulang tidak menumpuk listener
+let s2
 t('cleanup melepas listener & socket; hook dijalankan lagi → socket baru, listener tepat satu', () => {
   reactState.cleanup()
   assert.equal(s1.disconnected, true); assert.equal(Object.keys(s1.listeners).length, 0); assert.equal(st().connected, false)
   st().logout(); assert.equal(st().sync, 'ok')
   st().setAuth({ id: 'u9' }, 'tok2')
-  useSocket(); const s2 = sockets.at(-1)
+  useSocket(); s2 = sockets.at(-1)
   assert.notEqual(s2, s1)
   for (const ev of ['connect', 'session_restored', 'turn_changed']) assert.equal(s2.listeners[ev].length, 1)
   // login baru: diam-diam (tanpa overlay), resume tetap dikirim
   s2.open(); assert.equal(st().sync, 'ok'); assert.equal(s2.sent.filter(([e]) => e === 'resume_session').length, 1)
+})
+
+// S6: navigasi Scoreboard / Room
+const roomState = { code: 'ABC123', status: 'waiting', hostId: 'u9', players: [{ id: 'u9', connected: true, inRoom: true }], game: null, setScores: {}, gameHistory: [] }
+t('set_over menyimpan riwayat beku di setResult', () => {
+  const data = { rankings: [{ id: 'u9', totalScore: -5 }], setScores: { u9: -5 }, gameHistory: [{ gameNumber: 1 }, { gameNumber: 2 }, { gameNumber: 3 }, { gameNumber: 4 }] }
+  s2.fire('set_over', data)
+  assert.equal(st().setResult.gameHistory.length, 4)
+})
+t('room_returned: sisa state set/game dibuang, room dipertahankan, pindah ke /lobby; redirect 2 dtk ke /result dibatalkan', () => {
+  st().setGameState({ currentTurn: 'u1', myHand: [] }); st().pushEvent({ type: 'game_over' })
+  navCalls.length = 0
+  s2.fire('room_returned', roomState)
+  assert.equal(st().setResult, null); assert.equal(st().gameState, null); assert.equal(st().currentTurn, null)
+  assert.deepEqual(st().events, []); assert.equal(st().roomCode, 'ABC123'); assert.equal(st().roomInfo.status, 'waiting')
+  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
+  tick(2_500)                                           // timer set_over lama jangan menyeret ke /result
+  assert.equal(navCalls.filter(c => c[0] === '/result').length, 0)
+})
+t('session_restored view "result" saat room sudah waiting → Scoreboard dipulihkan; view "room" → Room', () => {
+  const sr = { setResult: { rankings: [], setScores: {}, gameHistory: [{}] } }
+  s2.fire('session_restored', { ...roomState, ...sr, view: 'result' })
+  assert.deepEqual(navCalls.at(-1), ['/result', { replace: true }]); assert.equal(st().setResult.gameHistory.length, 1)
+  s2.fire('session_restored', { ...roomState, ...sr, view: 'room' })
+  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }]); assert.equal(st().setResult, null)
+  s2.fire('session_restored', { ...roomState, status: 'playing', game: { currentTurn: 'u9' }, view: 'game' })
+  assert.deepEqual(navCalls.at(-1), ['/game', { replace: true }])
+})
+t('room_left (Exit Room / Back to Menu Utama): state room dibersihkan dan kembali ke Menu Utama', () => {
+  s2.fire('room_left', { roomCode: 'ABC123', roomDeleted: false })
+  assert.equal(st().roomCode, null); assert.equal(st().roomInfo, null); assert.equal(st().gameState, null)
+  assert.deepEqual(navCalls.at(-1), ['/lobby', undefined])
+})
+t('return_room_error / leave_room_error muncul sebagai event agar tombol aktif kembali', () => {
+  s2.fire('return_room_error', { code: 'GAME_IN_PROGRESS' })
+  assert.equal(st().events[0].type, 'return_room_error'); assert.equal(st().events[0].code, 'GAME_IN_PROGRESS')
+  s2.fire('leave_room_error', { code: 'NOT_IN_ROOM' })
+  assert.equal(st().events[0].type, 'leave_room_error')
+})
+const fixture = JSON.parse(fs.readFileSync(new URL('./fixture-restored-waiting.json', import.meta.url)))
+t('fixture server asli: view result → /result, setResult terisi, bukan /lobby', () => {
+  s2.fire('session_restored', fixture)
+  assert.equal(fixture.status, 'waiting'); assert.equal(fixture.view, 'result')
+  assert.deepEqual(navCalls.at(-1), ['/result', { replace: true }])
+  assert.equal(st().setResult.gameHistory.length, 4)
+  assert.equal(st().roomInfo.players.filter(p => p.inRoom === false).length, 3)
 })
 console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)

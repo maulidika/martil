@@ -5,7 +5,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
 mkdir -p "$OUT/hooks" "$OUT/store" "$OUT/utils" "$OUT/stubs"
-cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"
+cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"; cp "$HERE/fixture-restored-waiting.json" "$OUT/"
 for f in hooks/useSocket store/gameStore utils/session; do
   sed -e "s#from 'zustand'#from '../stubs/zustand.mjs'#" -e "s#from 'react'#from '../stubs/react.mjs'#" \
       -e "s#from 'socket.io-client'#from '../stubs/sio.mjs'#" -e "s#from 'react-router-dom'#from '../stubs/router.mjs'#" \

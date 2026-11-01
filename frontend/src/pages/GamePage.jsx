@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
 import { emitSocket } from '../hooks/useSocket'
 import GameSyncWaiting from '../components/GameSyncWaiting'
-import { detectCombo, sortHand, comboLabel, cardLabel, SUIT_SYM, IS_RED } from '../utils/comboDetector'
+import { detectCombo, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
 
 /* ── palette ─────────────────────────────────────────────── */
 const C = {
@@ -119,7 +119,7 @@ export default function GamePage() {
               Dimainkan oleh {tableTop.playerId === user?.id ? 'kamu' : tableTop.playerId.slice(0,6)}
             </div>
             <div style={{ display:'flex', gap:6, justifyContent:'center', flexWrap:'wrap' }}>
-              {tableTop.combo.cards.map(c => <CardTile key={c.id} card={c} size="md" />)}
+              {displayOrder(tableTop.combo).map(c => <CardTile key={c.id} card={c} size="md" />)}
             </div>
             <div style={{ fontSize:12, color:C.accent, fontWeight:600, marginTop:2 }}>
               {comboLabel(tableTop.combo)}

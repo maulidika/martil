@@ -143,10 +143,14 @@ export function useSocket() {
 
     // ── Pemulihan sesi (reconnect / refresh) ───────────────────────
     s.on('session_restored', (state) => {
-      debugLog('SESSION_RESTORED', { roomCode: state?.code, status: state?.status, turn: state?.game?.currentTurn })
+      const route = routeForRestoredState(state)
+      debugLog('SESSION_RESTORED', {
+        roomCode: state?.code, status: state?.status, view: state?.view,
+        hasSetResult: !!state?.setResult, route, turn: state?.game?.currentTurn,
+      })
       useGameStore.getState().applyRestoredSession(state)
       setSyncStatus('ok')
-      navigate(routeForRestoredState(state), { replace: true })
+      navigate(route, { replace: true })
     })
 
     s.on('session_none', ({ reason } = {}) => {

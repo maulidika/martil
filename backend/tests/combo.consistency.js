@@ -96,7 +96,22 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
   assert.equal(canBeat(lowB, lowA), true); assert.equal(canBeat(lowA, lowB), false);
   console.log('  PASS  urutan straight: A-2-3-4-5 < 2-3-4-5-6 < … < 10-J-Q-K-A (biasa dan straight flush)');
 
-  // 5) Sanity perbandingan di server (tidak diubah): straight tetap kalah dari flush, dst.
+  // 5) Urutan tampil di meja: straight rendah ditulis A-2-3-4-5 / 2-3-4-5-6; yang lain tidak berubah
+  const shown = (ids) => client.displayOrder(client.detectCombo(client.sortHand(pick(ids)))).map(c => c.rank).join('-');
+  assert.equal(shown(['AS','2H','3D','4C','5S']), 'A-2-3-4-5');
+  assert.equal(shown(['2S','3H','4D','5C','6S']), '2-3-4-5-6');
+  assert.equal(shown(['AD','2D','3D','4D','5D']), 'A-2-3-4-5');          // straight flush
+  assert.equal(shown(['2H','3H','4H','5H','6H']), '2-3-4-5-6');
+  assert.equal(shown(['7S','8H','9D','10C','JS']), '7-8-9-10-J');
+  assert.equal(shown(['10S','JH','QD','KC','AS']), '10-J-Q-K-A');
+  assert.equal(shown(['3S','3H','3D','KC','KS']), '3-3-3-K-K');          // full house: tidak diubah
+  assert.equal(shown(['2S']), '2');
+  // server mengirim kartu dalam urutan tangan (3,4,5,A,2) — tampilannya yang diubah, bukan datanya
+  const serverOrder = server(pick(['AS','2H','3D','4C','5S'])).cards.map(c => c.rank).join('-');
+  assert.equal(serverOrder, '3-4-5-A-2');
+  console.log('  PASS  tampilan meja: A-2-3-4-5 dan 2-3-4-5-6 ditulis berurutan, kombinasi lain tidak berubah');
+
+  // 6) Sanity perbandingan di server (tidak diubah): straight tetap kalah dari flush, dst.
   const st = server(pick(['3S','4H','5D','6C','7S']));
   const fl = server(pick(['3S','5S','8S','JS','KS']));
   assert.equal(canBeat(fl, st), true);

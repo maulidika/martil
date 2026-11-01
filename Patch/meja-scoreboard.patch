@@ -1,0 +1,190 @@
+diff --git a4/README.md b4/README.md
+index 9bc3746..1fce0d3 100644
+--- a4/README.md
++++ b4/README.md
+@@ -150,6 +150,7 @@ NODE_ENV=development
+ - ✅ Valid: `A-2-3-4-5`, `2-3-4-5-6`, `10-J-Q-K-A`
+ - ❌ Tidak valid: `J-Q-K-A-2`, `Q-K-A-2-3`, `K-A-2-3-4`
+ - **Kekuatan straight** dinilai dari kartu paling kanan pada urutan yang ditulis: `A-2-3-4-5` (terkecil, dihitung 5) < `2-3-4-5-6` (dihitung 6) < `3-4-5-6-7` < … < `10-J-Q-K-A` (terbesar). Berlaku juga untuk Straight Flush; jika kartu ujungnya sama rank, suit kartu ujung yang menentukan.
++- Di meja, A-2-3-4-5 dan 2-3-4-5-6 ditampilkan berurutan seperti ditulis (`displayOrder` di `comboDetector.js`); urutan kartu di tangan (3…K-A-2) dan data dari server tidak berubah.
+ - Aturan ini harus identik di `backend/src/game/validator.js` dan `frontend/src/utils/comboDetector.js`; `npm run test:combo` (folder backend) memeriksa ±2,6 juta kombinasi di kedua sisi.
+ 
+ ### Sistem Giliran
+@@ -210,7 +211,7 @@ Backend adalah sumber kebenaran. Setiap kali socket tersambung (login, refresh,
+ 
+ | Event server → klien | Arti |
+ |---|---|
+-| `session_restored` | Snapshot lengkap (status room, kartu, giliran, meja, `timeLeft`, `setResult` bila Scoreboard). Klien menimpa seluruh state lalu pindah ke `/lobby`, `/game`, atau `/result` sesuai status. |
++| `session_restored` | (`view`: `game` / `result` / `room` ditentukan server) Snapshot lengkap (status room, kartu, giliran, meja, `timeLeft`, `setResult` bila Scoreboard). Klien menimpa seluruh state lalu pindah ke `/lobby`, `/game`, atau `/result` sesuai status. |
+ | `session_none` `{reason}` | Tidak ada sesi: `NO_ROOM`, `EXPIRED` (terputus > 60 dtk di room waiting/done), atau `ROOM_CLOSED` (semua pemain terputus > 10 menit). |
+ | `session_replaced` | Akun yang sama mengambil alih dari tab/perangkat lain. Tab lama melihat overlay dengan tombol "Pakai di tab ini". |
+ | `player_disconnected` / `player_reconnected` | Hanya dikirim ke pemain lain; resume tidak mengirim ulang kartu atau state ke mereka. |
+diff --git a4/backend/tests/combo.consistency.js b4/backend/tests/combo.consistency.js
+index 94f3d9d..3b9789e 100644
+--- a4/backend/tests/combo.consistency.js
++++ b4/backend/tests/combo.consistency.js
+@@ -96,7 +96,22 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
+   assert.equal(canBeat(lowB, lowA), true); assert.equal(canBeat(lowA, lowB), false);
+   console.log('  PASS  urutan straight: A-2-3-4-5 < 2-3-4-5-6 < … < 10-J-Q-K-A (biasa dan straight flush)');
+ 
+-  // 5) Sanity perbandingan di server (tidak diubah): straight tetap kalah dari flush, dst.
++  // 5) Urutan tampil di meja: straight rendah ditulis A-2-3-4-5 / 2-3-4-5-6; yang lain tidak berubah
++  const shown = (ids) => client.displayOrder(client.detectCombo(client.sortHand(pick(ids)))).map(c => c.rank).join('-');
++  assert.equal(shown(['AS','2H','3D','4C','5S']), 'A-2-3-4-5');
++  assert.equal(shown(['2S','3H','4D','5C','6S']), '2-3-4-5-6');
++  assert.equal(shown(['AD','2D','3D','4D','5D']), 'A-2-3-4-5');          // straight flush
++  assert.equal(shown(['2H','3H','4H','5H','6H']), '2-3-4-5-6');
++  assert.equal(shown(['7S','8H','9D','10C','JS']), '7-8-9-10-J');
++  assert.equal(shown(['10S','JH','QD','KC','AS']), '10-J-Q-K-A');
++  assert.equal(shown(['3S','3H','3D','KC','KS']), '3-3-3-K-K');          // full house: tidak diubah
++  assert.equal(shown(['2S']), '2');
++  // server mengirim kartu dalam urutan tangan (3,4,5,A,2) — tampilannya yang diubah, bukan datanya
++  const serverOrder = server(pick(['AS','2H','3D','4C','5S'])).cards.map(c => c.rank).join('-');
++  assert.equal(serverOrder, '3-4-5-A-2');
++  console.log('  PASS  tampilan meja: A-2-3-4-5 dan 2-3-4-5-6 ditulis berurutan, kombinasi lain tidak berubah');
++
++  // 6) Sanity perbandingan di server (tidak diubah): straight tetap kalah dari flush, dst.
+   const st = server(pick(['3S','4H','5D','6C','7S']));
+   const fl = server(pick(['3S','5S','8S','JS','KS']));
+   assert.equal(canBeat(fl, st), true);
+diff --git a4/frontend/src/hooks/useSocket.js b4/frontend/src/hooks/useSocket.js
+index dc6906a..9a257c3 100644
+--- a4/frontend/src/hooks/useSocket.js
++++ b4/frontend/src/hooks/useSocket.js
+@@ -143,10 +143,14 @@ export function useSocket() {
+ 
+     // ── Pemulihan sesi (reconnect / refresh) ───────────────────────
+     s.on('session_restored', (state) => {
+-      debugLog('SESSION_RESTORED', { roomCode: state?.code, status: state?.status, turn: state?.game?.currentTurn })
++      const route = routeForRestoredState(state)
++      debugLog('SESSION_RESTORED', {
++        roomCode: state?.code, status: state?.status, view: state?.view,
++        hasSetResult: !!state?.setResult, route, turn: state?.game?.currentTurn,
++      })
+       useGameStore.getState().applyRestoredSession(state)
+       setSyncStatus('ok')
+-      navigate(routeForRestoredState(state), { replace: true })
++      navigate(route, { replace: true })
+     })
+ 
+     s.on('session_none', ({ reason } = {}) => {
+diff --git a4/frontend/src/pages/GamePage.jsx b4/frontend/src/pages/GamePage.jsx
+index ea54c34..b90b512 100644
+--- a4/frontend/src/pages/GamePage.jsx
++++ b4/frontend/src/pages/GamePage.jsx
+@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
+ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
+ import GameSyncWaiting from '../components/GameSyncWaiting'
+-import { detectCombo, sortHand, comboLabel, cardLabel, SUIT_SYM, IS_RED } from '../utils/comboDetector'
++import { detectCombo, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
+ 
+ /* ── palette ─────────────────────────────────────────────── */
+ const C = {
+@@ -119,7 +119,7 @@ export default function GamePage() {
+               Dimainkan oleh {tableTop.playerId === user?.id ? 'kamu' : tableTop.playerId.slice(0,6)}
+             </div>
+             <div style={{ display:'flex', gap:6, justifyContent:'center', flexWrap:'wrap' }}>
+-              {tableTop.combo.cards.map(c => <CardTile key={c.id} card={c} size="md" />)}
++              {displayOrder(tableTop.combo).map(c => <CardTile key={c.id} card={c} size="md" />)}
+             </div>
+             <div style={{ fontSize:12, color:C.accent, fontWeight:600, marginTop:2 }}>
+               {comboLabel(tableTop.combo)}
+diff --git a4/frontend/src/pages/LobbyPage.jsx b4/frontend/src/pages/LobbyPage.jsx
+index f9ac43f..ca2a0ea 100644
+--- a4/frontend/src/pages/LobbyPage.jsx
++++ b4/frontend/src/pages/LobbyPage.jsx
+@@ -27,7 +27,7 @@ const s = {
+ 
+ export default function LobbyPage() {
+   const navigate  = useNavigate()
+-  const { user, token, roomCode, roomInfo, logout, events } = useGameStore()
++  const { user, token, roomCode, roomInfo, logout, events, setResult } = useGameStore()
+   const [joinInput, setJoinInput] = useState('')
+   const [maxGames, setMaxGames]   = useState(4)
+   const [localErr, setLocalErr]   = useState('')
+@@ -45,6 +45,19 @@ export default function LobbyPage() {
+   const allBack = players.every(p => p.inRoom !== false)
+   const ready = players.length === 4 && allBack
+ 
++  // Pengaman: pemain yang belum menekan Back to Room (inRoom=false) dan masih punya hasil set
++  // seharusnya berada di Scoreboard, bukan di Room. Berlaku untuk jalur apa pun yang membawanya ke sini
++  // (mis. refresh): dipulangkan ke /result dengan hasil dari server.
++  const me = players.find(p => p.id === user?.id)
++  useEffect(() => {
++    if (!myRoom || !me || me.inRoom !== false) return
++    const result = setResult || myRoom.setResult
++    if (!result) return
++    console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom.code })
++    if (!setResult) useGameStore.getState().setSetResult(result)
++    navigate('/result', { replace: true })
++  }, [myRoom?.code, me?.inRoom, !!setResult])
++
+   // Exit Room gagal → aktifkan kembali tombol dan tampilkan pesan.
+   useEffect(() => {
+     const ev = events[0]
+diff --git a4/frontend/src/utils/comboDetector.js b4/frontend/src/utils/comboDetector.js
+index e483fdf..331be89 100644
+--- a4/frontend/src/utils/comboDetector.js
++++ b4/frontend/src/utils/comboDetector.js
+@@ -100,3 +100,16 @@ export function comboLabel(combo) {
+   }
+   return ''
+ }
++
++// Urutan tampil kartu sebuah kombinasi di meja (hanya tampilan; kartu di tangan, data server,
++// dan aturan tidak berubah). Straight rendah ditulis menurut urutan mainnya:
++// A-2-3-4-5 dan 2-3-4-5-6, bukan 3-4-5-A-2 / 3-4-5-6-2 (urutan tangan di mana 2 tertinggi).
++const LOW_STRAIGHT_DISPLAY = [['A', '2', '3', '4', '5'], ['2', '3', '4', '5', '6']]
++
++export function displayOrder(combo) {
++  const cards = combo?.cards || []
++  if (combo?.type !== 'paketan' || (combo.subtype !== 'straight' && combo.subtype !== 'straightflush')) return cards
++  const ranks = new Set(cards.map(c => c.rank))
++  const written = LOW_STRAIGHT_DISPLAY.find(seq => ranks.size === 5 && seq.every(r => ranks.has(r)))
++  return written ? written.map(r => cards.find(c => c.rank === r)) : cards
++}
+diff --git b4/frontend/tests/sync.sim/fixture-restored-waiting.json b4/frontend/tests/sync.sim/fixture-restored-waiting.json
+new file mode 100644
+index 0000000..f6019df
+--- /dev/null
++++ b4/frontend/tests/sync.sim/fixture-restored-waiting.json
+@@ -0,0 +1 @@
++{"code":"LRCEPR","hostId":"u1_1","status":"waiting","maxGames":4,"players":[{"id":"u1_1","connected":true,"inRoom":true},{"id":"u2_2","connected":true,"inRoom":false},{"id":"u3_3","connected":true,"inRoom":false},{"id":"u4_4","connected":true,"inRoom":false}],"setScores":{},"gameHistory":[],"game":null,"setResult":{"rankings":[{"id":"u3_3","totalScore":-13,"rank":1},{"id":"u4_4","totalScore":5,"rank":2},{"id":"u1_1","totalScore":6,"rank":3},{"id":"u2_2","totalScore":15,"rank":4}],"setScores":{"u1_1":6,"u2_2":15,"u3_3":-13,"u4_4":5},"gameHistory":[{"gameId":"d1d396e9-e39a-428d-a2e0-a001f5a6f5df","gameNumber":1,"winnerId":"u3_3","scores":[{"id":"u1_1","score":4,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"5","suit":"D","id":"5D"},{"rank":"5","suit":"H","id":"5H"},{"rank":"10","suit":"D","id":"10D"},{"rank":"10","suit":"C","id":"10C"}]},{"id":"u2_2","score":4,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"5","suit":"C","id":"5C"},{"rank":"7","suit":"H","id":"7H"},{"rank":"8","suit":"H","id":"8H"},{"rank":"Q","suit":"C","id":"QC"}]},{"id":"u3_3","score":-10,"winType":"single2","isWinner":true,"remainingCards":[]},{"id":"u4_4","score":3,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"10","suit":"H","id":"10H"},{"rank":"10","suit":"S","id":"10S"},{"rank":"J","suit":"C","id":"JC"}]}]},{"gameId":"62599d90-a64c-45d6-81e2-62607da87855","gameNumber":2,"winnerId":"u3_3","scores":[{"id":"u1_1","score":4,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"3","suit":"D","id":"3D"},{"rank":"3","suit":"C","id":"3C"},{"rank":"3","suit":"H","id":"3H"},{"rank":"4","suit":"C","id":"4C"}]},{"id":"u2_2","score":4,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"6","suit":"C","id":"6C"},{"rank":"6","suit":"H","id":"6H"},{"rank":"7","suit":"D","id":"7D"},{"rank":"9","suit":"S","id":"9S"}]},{"id":"u3_3","score":-5,"winType":"normal","isWinner":true,"remainingCards":[]},{"id":"u4_4","score":5,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"3","suit":"S","id":"3S"},{"rank":"5","suit":"S","id":"5S"},{"rank":"6","suit":"D","id":"6D"},{"rank":"6","suit":"S","id":"6S"},{"rank":"7","suit":"C","id":"7C"}]}]},{"gameId":"f335a1be-f4eb-4295-a35d-14f837bab3fc","gameNumber":3,"winnerId":"u1_1","scores":[{"id":"u1_1","score":-5,"winType":"normal","isWinner":true,"remainingCards":[]},{"id":"u2_2","score":4,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"3","suit":"C","id":"3C"},{"rank":"7","suit":"H","id":"7H"},{"rank":"9","suit":"C","id":"9C"},{"rank":"10","suit":"D","id":"10D"}]},{"id":"u3_3","score":1,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"6","suit":"S","id":"6S"}]},{"id":"u4_4","score":2,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"4","suit":"H","id":"4H"},{"rank":"5","suit":"D","id":"5D"}]}]},{"gameId":"026de4e3-5b92-47a5-95a1-5665e4c0afee","gameNumber":4,"winnerId":"u4_4","scores":[{"id":"u1_1","score":3,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"4","suit":"H","id":"4H"},{"rank":"5","suit":"C","id":"5C"},{"rank":"Q","suit":"C","id":"QC"}]},{"id":"u2_2","score":3,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"7","suit":"H","id":"7H"},{"rank":"8","suit":"C","id":"8C"},{"rank":"9","suit":"D","id":"9D"}]},{"id":"u3_3","score":1,"penaltyType":null,"isWinner":false,"remainingCards":[{"rank":"3","suit":"S","id":"3S"}]},{"id":"u4_4","score":-5,"winType":"normal","isWinner":true,"remainingCards":[]}]}]},"view":"result"}
+\ No newline at end of file
+diff --git a4/frontend/tests/sync.sim/run.mjs b4/frontend/tests/sync.sim/run.mjs
+index 6a1cdb1..745c3c8 100644
+--- a4/frontend/tests/sync.sim/run.mjs
++++ b4/frontend/tests/sync.sim/run.mjs
+@@ -1,4 +1,5 @@
+ import assert from 'node:assert/strict'
++import fs from 'node:fs'
+ // ── lingkungan browser palsu ──
+ const ss = new Map([['martil_token', JSON.stringify('tok')], ['martil_user', JSON.stringify({ id: 'u1' })]])
+ globalThis.sessionStorage = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
+@@ -159,4 +160,12 @@ t('return_room_error / leave_room_error muncul sebagai event agar tombol aktif k
+   s2.fire('leave_room_error', { code: 'NOT_IN_ROOM' })
+   assert.equal(st().events[0].type, 'leave_room_error')
+ })
++const fixture = JSON.parse(fs.readFileSync(new URL('./fixture-restored-waiting.json', import.meta.url)))
++t('fixture server asli: view result → /result, setResult terisi, bukan /lobby', () => {
++  s2.fire('session_restored', fixture)
++  assert.equal(fixture.status, 'waiting'); assert.equal(fixture.view, 'result')
++  assert.deepEqual(navCalls.at(-1), ['/result', { replace: true }])
++  assert.equal(st().setResult.gameHistory.length, 4)
++  assert.equal(st().roomInfo.players.filter(p => p.inRoom === false).length, 3)
++})
+ console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git a4/frontend/tests/sync.sim/run.sh b4/frontend/tests/sync.sim/run.sh
+index 5808287..c98ec06 100755
+--- a4/frontend/tests/sync.sim/run.sh
++++ b4/frontend/tests/sync.sim/run.sh
+@@ -5,7 +5,7 @@
+ set -euo pipefail
+ HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
+ mkdir -p "$OUT/hooks" "$OUT/store" "$OUT/utils" "$OUT/stubs"
+-cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"
++cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"; cp "$HERE/fixture-restored-waiting.json" "$OUT/"
+ for f in hooks/useSocket store/gameStore utils/session; do
+   sed -e "s#from 'zustand'#from '../stubs/zustand.mjs'#" -e "s#from 'react'#from '../stubs/react.mjs'#" \
+       -e "s#from 'socket.io-client'#from '../stubs/sio.mjs'#" -e "s#from 'react-router-dom'#from '../stubs/router.mjs'#" \
