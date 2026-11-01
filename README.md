@@ -149,6 +149,7 @@ NODE_ENV=development
 ### Straight Valid / Tidak Valid
 - ✅ Valid: `A-2-3-4-5`, `2-3-4-5-6`, `10-J-Q-K-A`
 - ❌ Tidak valid: `J-Q-K-A-2`, `Q-K-A-2-3`, `K-A-2-3-4`
+- **Kekuatan straight** dinilai dari kartu paling kanan pada urutan yang ditulis: `A-2-3-4-5` (terkecil, dihitung 5) < `2-3-4-5-6` (dihitung 6) < `3-4-5-6-7` < … < `10-J-Q-K-A` (terbesar). Berlaku juga untuk Straight Flush; jika kartu ujungnya sama rank, suit kartu ujung yang menentukan.
 - Aturan ini harus identik di `backend/src/game/validator.js` dan `frontend/src/utils/comboDetector.js`; `npm run test:combo` (folder backend) memeriksa ±2,6 juta kombinasi di kedua sisi.
 
 ### Sistem Giliran

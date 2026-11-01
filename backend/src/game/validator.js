@@ -71,6 +71,17 @@ function detectTris(cards) {
 
 // ─── Paketan ─────────────────────────────────────────────────────────────────
 
+// Kekuatan straight dinilai dari kartu paling kanan pada urutan yang ditulis, bukan dari
+// kartu terbesar menurut urutan tangan (di mana 2 adalah yang tertinggi):
+//   A-2-3-4-5 → 5 (straight terkecil), 2-3-4-5-6 → 6 (terkecil kedua), … 10-J-Q-K-A → A (terbesar).
+// Kunci di bawah memakai urutan tangan (3 < … < A < 2), sama seperti seqKey di detectPaketan.
+const LOW_STRAIGHT_TOP = { '3,4,5,A,2': '5', '3,4,5,6,2': '6' };
+
+function straightHighCard(cards, seqKey) {
+  const topRank = LOW_STRAIGHT_TOP[seqKey];
+  return topRank ? cards.find(c => c.rank === topRank) : cards[4];
+}
+
 function detectPaketan(rawCards) {
   const cards    = [...rawCards].sort(compareCards);
   const ranks    = cards.map(c => c.rank);
@@ -87,7 +98,7 @@ function detectPaketan(rawCards) {
   }
   // Straight Flush
   if (sameSuit && isStraight) {
-    return { type: 'paketan', subtype: 'straightflush', tier: PAKETAN_TIER.straightflush, highCard: cards[4], cards };
+    return { type: 'paketan', subtype: 'straightflush', tier: PAKETAN_TIER.straightflush, highCard: straightHighCard(cards, seqKey), cards };
   }
   // Four of a Kind
   if (vals.includes(4)) {
@@ -105,7 +116,7 @@ function detectPaketan(rawCards) {
   }
   // Straight
   if (isStraight) {
-    return { type: 'paketan', subtype: 'straight', tier: PAKETAN_TIER.straight, highCard: cards[4], cards };
+    return { type: 'paketan', subtype: 'straight', tier: PAKETAN_TIER.straight, highCard: straightHighCard(cards, seqKey), cards };
   }
   return null;
 }

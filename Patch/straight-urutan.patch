@@ -1,0 +1,92 @@
+diff --git a3/README.md b3/README.md
+index 1a57e24..9bc3746 100644
+--- a3/README.md
++++ b3/README.md
+@@ -149,6 +149,7 @@ NODE_ENV=development
+ ### Straight Valid / Tidak Valid
+ - ✅ Valid: `A-2-3-4-5`, `2-3-4-5-6`, `10-J-Q-K-A`
+ - ❌ Tidak valid: `J-Q-K-A-2`, `Q-K-A-2-3`, `K-A-2-3-4`
++- **Kekuatan straight** dinilai dari kartu paling kanan pada urutan yang ditulis: `A-2-3-4-5` (terkecil, dihitung 5) < `2-3-4-5-6` (dihitung 6) < `3-4-5-6-7` < … < `10-J-Q-K-A` (terbesar). Berlaku juga untuk Straight Flush; jika kartu ujungnya sama rank, suit kartu ujung yang menentukan.
+ - Aturan ini harus identik di `backend/src/game/validator.js` dan `frontend/src/utils/comboDetector.js`; `npm run test:combo` (folder backend) memeriksa ±2,6 juta kombinasi di kedua sisi.
+ 
+ ### Sistem Giliran
+diff --git a3/backend/src/game/validator.js b3/backend/src/game/validator.js
+index 6f24d02..adcb174 100644
+--- a3/backend/src/game/validator.js
++++ b3/backend/src/game/validator.js
+@@ -71,6 +71,17 @@ function detectTris(cards) {
+ 
+ // ─── Paketan ─────────────────────────────────────────────────────────────────
+ 
++// Kekuatan straight dinilai dari kartu paling kanan pada urutan yang ditulis, bukan dari
++// kartu terbesar menurut urutan tangan (di mana 2 adalah yang tertinggi):
++//   A-2-3-4-5 → 5 (straight terkecil), 2-3-4-5-6 → 6 (terkecil kedua), … 10-J-Q-K-A → A (terbesar).
++// Kunci di bawah memakai urutan tangan (3 < … < A < 2), sama seperti seqKey di detectPaketan.
++const LOW_STRAIGHT_TOP = { '3,4,5,A,2': '5', '3,4,5,6,2': '6' };
++
++function straightHighCard(cards, seqKey) {
++  const topRank = LOW_STRAIGHT_TOP[seqKey];
++  return topRank ? cards.find(c => c.rank === topRank) : cards[4];
++}
++
+ function detectPaketan(rawCards) {
+   const cards    = [...rawCards].sort(compareCards);
+   const ranks    = cards.map(c => c.rank);
+@@ -87,7 +98,7 @@ function detectPaketan(rawCards) {
+   }
+   // Straight Flush
+   if (sameSuit && isStraight) {
+-    return { type: 'paketan', subtype: 'straightflush', tier: PAKETAN_TIER.straightflush, highCard: cards[4], cards };
++    return { type: 'paketan', subtype: 'straightflush', tier: PAKETAN_TIER.straightflush, highCard: straightHighCard(cards, seqKey), cards };
+   }
+   // Four of a Kind
+   if (vals.includes(4)) {
+@@ -105,7 +116,7 @@ function detectPaketan(rawCards) {
+   }
+   // Straight
+   if (isStraight) {
+-    return { type: 'paketan', subtype: 'straight', tier: PAKETAN_TIER.straight, highCard: cards[4], cards };
++    return { type: 'paketan', subtype: 'straight', tier: PAKETAN_TIER.straight, highCard: straightHighCard(cards, seqKey), cards };
+   }
+   return null;
+ }
+diff --git a3/backend/tests/combo.consistency.js b3/backend/tests/combo.consistency.js
+index ec172b7..94f3d9d 100644
+--- a3/backend/tests/combo.consistency.js
++++ b3/backend/tests/combo.consistency.js
+@@ -69,7 +69,34 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
+   assert.equal(bad.length, 0, `${bad.length} kombinasi tidak konsisten, contoh:\n   ${bad.filter(Boolean).join('\n   ')}`);
+   console.log(`  PASS  ${total.toLocaleString('id-ID')} kombinasi: server dan klien identik`);
+ 
+-  // 4) Sanity perbandingan di server (tidak diubah): straight tetap kalah dari flush, dst.
++  // 4) Urutan kekuatan straight: dinilai dari kartu paling kanan yang ditulis
++  //    A-2-3-4-5 < 2-3-4-5-6 < 3-4-5-6-7 < … < 10-J-Q-K-A
++  const seqs = [
++    ['A','2','3','4','5'], ['2','3','4','5','6'], ['3','4','5','6','7'], ['4','5','6','7','8'],
++    ['5','6','7','8','9'], ['6','7','8','9','10'], ['7','8','9','10','J'], ['8','9','10','J','Q'],
++    ['9','10','J','Q','K'], ['10','J','Q','K','A'],
++  ];
++  const mixedSuits = ['S','H','D','C','S'];             // bukan flush
++  const build = (seq, suits) => seq.map((r, i) => deck.find(c => c.rank === r && c.suit === suits[i % suits.length]));
++  for (let i = 0; i < seqs.length; i++) {
++    for (let j = i + 1; j < seqs.length; j++) {
++      for (const [kind, suits] of [['straight', mixedSuits], ['straightflush', ['H']]]) {
++        if (kind === 'straightflush' && j === seqs.length - 1 && seqs[j][0] === '10') continue; // 10-J-Q-K-A satu suit = royal flush
++        const lo = server(build(seqs[i], suits)), hi = server(build(seqs[j], suits));
++        assert.equal(lo.subtype, kind); assert.equal(hi.subtype, kind);
++        assert.equal(canBeat(hi, lo), true,  `${seqs[j].join('-')} harus mengalahkan ${seqs[i].join('-')} (${kind})`);
++        assert.equal(canBeat(lo, hi), false, `${seqs[i].join('-')} tidak boleh mengalahkan ${seqs[j].join('-')} (${kind})`);
++      }
++    }
++  }
++  // straight yang sama: kartu ujung kanan menentukan suit (♠ > ♥ > ♣ > ♦)
++  const lowA = server(build(['A','2','3','4','5'], ['D','C','H','S','D']));   // ujung kanan 5♦
++  const lowB = server(build(['A','2','3','4','5'], ['D','C','H','D','S']));   // ujung kanan 5♠
++  assert.equal(lowA.highCard.id, '5D'); assert.equal(lowB.highCard.id, '5S');
++  assert.equal(canBeat(lowB, lowA), true); assert.equal(canBeat(lowA, lowB), false);
++  console.log('  PASS  urutan straight: A-2-3-4-5 < 2-3-4-5-6 < … < 10-J-Q-K-A (biasa dan straight flush)');
++
++  // 5) Sanity perbandingan di server (tidak diubah): straight tetap kalah dari flush, dst.
+   const st = server(pick(['3S','4H','5D','6C','7S']));
+   const fl = server(pick(['3S','5S','8S','JS','KS']));
+   assert.equal(canBeat(fl, st), true);
