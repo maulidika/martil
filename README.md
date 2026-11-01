@@ -148,7 +148,8 @@ NODE_ENV=development
 
 ### Straight Valid / Tidak Valid
 - ✅ Valid: `A-2-3-4-5`, `2-3-4-5-6`, `10-J-Q-K-A`
-- ❌ Tidak valid: `J-Q-K-A-2`, `Q-K-A-2-3`
+- ❌ Tidak valid: `J-Q-K-A-2`, `Q-K-A-2-3`, `K-A-2-3-4`
+- Aturan ini harus identik di `backend/src/game/validator.js` dan `frontend/src/utils/comboDetector.js`; `npm run test:combo` (folder backend) memeriksa ±2,6 juta kombinasi di kedua sisi.
 
 ### Sistem Giliran
 - Pemain bisa **Main** atau **Skip**
@@ -231,6 +232,24 @@ cd frontend && bash tests/sync.sim/run.sh   # klien: state machine koneksi
 
 ---
 
+## 🧭 Navigasi Room, Scoreboard, dan Exit Room
+
+| Aksi | Tempat | Event | Hasil |
+|---|---|---|---|
+| **Exit Room** | Room (sebelum game mulai) | `leave_room` | Pemain keluar dengan sengaja → Menu Utama. Host berpindah ke pemain terhubung; room dihapus bila kosong. Pemain lain tidak disconnect. |
+| **Back to Room** | Scoreboard | `return_to_room` | Tetap anggota room. Panggilan pertama mereset room ke `waiting` (skor/riwayat set lama dibersihkan); pemain lain yang masih di Scoreboard tetap melihat hasil bekunya. |
+| **Back to Menu Utama** | Scoreboard | `leave_room` | Keluar dari room sepenuhnya → Menu Utama (membuat/bergabung room baru). |
+
+- `leave_room` dan `return_to_room` ditolak saat game berjalan (`GAME_IN_PROGRESS`).
+- Setelah set selesai, semua pemain bertanda *belum kembali* (`inRoom=false`) sampai menekan Back to Room; host baru bisa memulai set berikutnya bila keempat pemain sudah kembali (`PLAYERS_NOT_READY` bila belum).
+- Room berstatus selesai yang punya kursi kosong tetap bisa dimasuki pemain baru (room kembali ke `waiting`).
+- Hasil set (peringkat, skor, riwayat 4 game) dibekukan di server (`setResult`) dan di klien, sehingga Scoreboard tidak berubah saat pemain lain mereset room dan tetap bisa dipulihkan setelah refresh (`view: 'result'`).
+- Log: `LEAVE_ROOM_REQUEST/REJECTED`, `ROOM_PLAYER_LEFT`, `ROOM_HOST_TRANSFERRED`, `ROOM_DELETED`, `RETURN_TO_ROOM_REQUEST/REJECTED`, `RETURN_TO_ROOM`, `ROOM_RESET_FOR_NEW_SET`, `JOIN_ROOM`.
+
+Uji otomatis tambahan (folder `backend`): `npm run test:nav` (satu set penuh dimainkan bot, lalu skenario Back to Room / Exit Room), `npm run test:combo` (konsistensi aturan kombinasi server vs klien).
+
+---
+
 ## 🐛 Troubleshooting
 
 **Port sudah dipakai?**
@@ -250,5 +269,5 @@ Pastikan `CLIENT_URL` di `backend/.env` sesuai dengan URL frontend yang berjalan
 **Debug lifecycle room setelah set selesai**
 - Backend menampilkan log berawalan `[MARTIL ...]`, misalnya `SET_OVER`, `LEAVE_ROOM_REQUEST`, `ROOM_PLAYER_LEFT`, dan `SOCKET_DISCONNECTING`.
 - Browser DevTools → Console menampilkan `SET_OVER_RECEIVED`, `LEAVE_ROOM_CLICKED`, `ROOM_LEFT_CONFIRMED`, serta perubahan `ROOM_UPDATED`.
-- Setelah hasil akhir muncul, tombol **Kembali ke Lobby** mengirim event `leave_room`. Frontend baru membersihkan state dan berpindah ke `/lobby` setelah menerima konfirmasi `room_left` dari backend.
+- Setelah hasil akhir muncul, **Back to Menu Utama** mengirim `leave_room` (state dibersihkan setelah konfirmasi `room_left`), sedangkan **Back to Room** mengirim `return_to_room` (konfirmasi `room_returned`).
 - Jika gagal, periksa kode pada log `LEAVE_ROOM_REJECTED` / `LEAVE_ROOM_FAILED`; jangan langsung menghapus data room secara manual.

@@ -7,7 +7,9 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "test": "jest",
-    "test:sim": "node tests/reconnect.sim.js"
+    "test:sim": "node tests/reconnect.sim.js",
+    "test:combo": "node tests/combo.consistency.js",
+    "test:nav": "node tests/room-navigation.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

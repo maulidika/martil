@@ -27,10 +27,11 @@ const s = {
 
 export default function LobbyPage() {
   const navigate  = useNavigate()
-  const { user, token, roomCode, roomInfo, logout } = useGameStore()
+  const { user, token, roomCode, roomInfo, logout, events } = useGameStore()
   const [joinInput, setJoinInput] = useState('')
   const [maxGames, setMaxGames]   = useState(4)
   const [localErr, setLocalErr]   = useState('')
+  const [exiting, setExiting]   = useState(false)
 
   // Auto-navigate when game starts
   useEffect(() => {
@@ -40,7 +41,21 @@ export default function LobbyPage() {
   const myRoom = roomInfo && roomInfo.code === roomCode ? roomInfo : null
   const isHost = myRoom?.hostId === user?.id
   const players = myRoom?.players || []
-  const ready = players.length === 4
+  // Setelah set selesai, semua pemain harus kembali ke Room (Back to Room) sebelum host bisa memulai.
+  const allBack = players.every(p => p.inRoom !== false)
+  const ready = players.length === 4 && allBack
+
+  // Exit Room gagal → aktifkan kembali tombol dan tampilkan pesan.
+  useEffect(() => {
+    const ev = events[0]
+    if (ev?.type === 'leave_room_error') {
+      setExiting(false)
+      setLocalErr(`Gagal keluar dari room: ${ev.code}`)
+    }
+  }, [events[0]?._id])
+
+  // Setelah keluar (room_left) state room dibersihkan → reset tombol.
+  useEffect(() => { if (!myRoom) setExiting(false) }, [!!myRoom])
 
   function doCreate() {
     setLocalErr('')
@@ -55,8 +70,21 @@ export default function LobbyPage() {
   }
 
   function doStart() {
-    if (!ready) return setLocalErr('Butuh 4 pemain untuk mulai.')
+    if (players.length !== 4) return setLocalErr('Butuh 4 pemain untuk mulai.')
+    if (!allBack) return setLocalErr('Tunggu semua pemain kembali ke Room.')
     emitSocket('start_game', { roomCode })
+  }
+
+  // Exit Room: keluar dengan sengaja (bukan disconnect) saat game belum dimulai.
+  function doExit() {
+    if (exiting) return
+    setLocalErr('')
+    console.info(`[MARTIL ${new Date().toISOString()}] EXIT_ROOM_CLICKED`, { roomCode })
+    setExiting(true)
+    if (!emitSocket('leave_room', { roomCode })) {
+      setExiting(false)
+      setLocalErr('Koneksi ke server terputus. Tunggu tersambung sebelum keluar dari room.')
+    }
   }
 
   function doLogout() {
@@ -140,7 +168,10 @@ export default function LobbyPage() {
                       {p ? (p.id === user?.id ? `${p.id.slice(0,8)} (kamu)` : p.id.slice(0,8)) : 'Menunggu…'}
                     </span>
                   </div>
-                  {p?.id === myRoom.hostId && <span style={{ fontSize:11, color:C.yellow }}>Host</span>}
+                  <span style={{ display:'flex', gap:8, alignItems:'center' }}>
+                    {p && p.inRoom === false && <span style={{ fontSize:11, color:C.muted }}>belum kembali</span>}
+                    {p?.id === myRoom.hostId && <span style={{ fontSize:11, color:C.yellow }}>Host</span>}
+                  </span>
                 </div>
               )
             })}
@@ -155,11 +186,21 @@ export default function LobbyPage() {
               style={{ ...s.btn, background: ready ? C.accent : '#333', color: ready ? '#fff' : C.muted, cursor: ready ? 'pointer' : 'not-allowed', marginBottom:0 }}
               onClick={doStart}
             >
-              {ready ? 'Mulai Game' : `Menunggu pemain (${players.length}/4)`}
+              {ready ? 'Mulai Game'
+                : players.length < 4 ? `Menunggu pemain (${players.length}/4)`
+                : 'Menunggu semua pemain kembali'}
             </button>
           ) : (
             <div style={{ ...s.hint, padding:'10px 0' }}>Menunggu host memulai game…</div>
           )}
+
+          <button
+            style={{ ...s.btn, background:'transparent', color:C.accent, border:`1px solid ${C.accent}`, marginTop:12, marginBottom:0, opacity: exiting ? 0.6 : 1, cursor: exiting ? 'default' : 'pointer' }}
+            onClick={doExit}
+            disabled={exiting}
+          >
+            {exiting ? 'Keluar dari room…' : 'Exit Room'}
+          </button>
         </div>
       )}
 

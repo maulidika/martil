@@ -17,13 +17,25 @@ export function sortHand(cards) {
   return [...cards].sort(compareCards)
 }
 
+// Straight yang sah (harus identik dengan VALID_STRAIGHTS di backend/src/game/validator.js).
+// Kunci disusun dengan urutan tangan pemain (3 < 4 < ... < K < A < 2), sama seperti
+// hasil sort pada _paketan() — jadi A-2-3-4-5 berkunci '3,4,5,A,2'.
 const VALID_STRAIGHTS = (() => {
+  const sortedKey = (ranks) => [...ranks].sort((a, b) => RV[a] - RV[b]).join(',')
   const s = new Set()
+
+  // Jendela 5 kartu berurutan dari 3 sampai As: 3-4-5-6-7 … 10-J-Q-K-A.
+  // J-Q-K-A-2, Q-K-A-2-3, dan K-A-2-3-4 TIDAK sah (2 tidak boleh di tengah/ujung atas).
   for (let i = 0; i <= RANKS.length - 5; i++) {
     const seq = RANKS.slice(i, i + 5)
     if (seq.indexOf('2') > 1) continue
-    s.add(seq.join(','))
+    s.add(sortedKey(seq))
   }
+
+  // Khusus: A-2-3-4-5 dan 2-3-4-5-6 (2 berperan sebagai kartu rendah).
+  // Tidak muncul pada jendela di atas karena 2 adalah kartu tertinggi pada urutan tangan.
+  s.add(sortedKey(['A', '2', '3', '4', '5']))
+  s.add(sortedKey(['2', '3', '4', '5', '6']))
   return s
 })()
 

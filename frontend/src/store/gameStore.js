@@ -62,7 +62,19 @@ export const useGameStore = create((set, get) => ({
     gameState: state.game ?? null,
     currentTurn: state.game?.currentTurn ?? null,
     selectedIds: [],
-    setResult: state.status === 'done' ? (state.setResult ?? null) : null,
+    setResult: (state.view === 'result' || state.status === 'done') ? (state.setResult ?? null) : null,
+    error: null,
+  }),
+  // Back to Room: tetap di room yang sama, tetapi semua sisa state game/set sebelumnya dibuang
+  // supaya tidak ada redirect basi ke /game maupun Scoreboard lama.
+  enterRoomView: (state) => set({
+    roomCode: state.code,
+    roomInfo: state,
+    gameState: null,
+    currentTurn: null,
+    selectedIds: [],
+    setResult: null,
+    events: [],
     error: null,
   }),
   clearRoomState: () => set({

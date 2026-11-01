@@ -225,6 +225,19 @@ export function useSocket() {
       navigate('/lobby')
     })
 
+    // Back to Room: server mereset room ke 'waiting' dan mengirim state room terbaru.
+    s.on('room_returned', (state) => {
+      debugLog('ROOM_RETURNED', { roomCode: state?.code, status: state?.status, players: state?.players?.length })
+      useGameStore.getState().enterRoomView(state)
+      navigate('/lobby', { replace: true })
+    })
+
+    s.on('return_room_error', ({ code }) => {
+      debugLog('RETURN_TO_ROOM_FAILED', { code })
+      setError(`Gagal kembali ke room: ${code}`)
+      useGameStore.getState().pushEvent({ type: 'return_room_error', code })
+    })
+
     s.on('leave_room_error', ({ code }) => {
       debugLog('LEAVE_ROOM_FAILED', { code })
       setError(`Gagal keluar dari room: ${code}`)

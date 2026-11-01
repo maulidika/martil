@@ -56,6 +56,8 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       const result = rm.joinRoom(roomCode, userId);
       if (!result.ok) return socket.emit('error', { code: result.error });
 
+      if (result.reset) debugLog('ROOM_RESET_FOR_NEW_SET', { roomCode, trigger: 'join_room', userId });
+      debugLog('JOIN_ROOM', { roomCode, userId, players: result.room.players.length });
       rm.bindSocket(roomCode, userId, socket.id);
       socket.join(roomCode);
       socket.emit('room_updated', rm.publicState(roomCode, userId));
@@ -67,7 +69,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     // Dikirim klien setiap kali socket tersambung (login, refresh, atau reconnect).
     socket.on('resume_session', () => resumeFor(socket));
 
-    // ── leave_room (available after a completed set) ──────────────────────
+    // ── leave_room ─────────────────────────────────────────────────────────
+    // Keluar dari room dengan sengaja ("Exit Room" di Room, "Back to Menu Utama" di Scoreboard).
+    // Diizinkan saat status waiting/done. Hanya socket pemain ini yang keluar dari room;
+    // pemain lain tidak terpengaruh.
     socket.on('leave_room', ({ roomCode } = {}) => {
       const code = String(roomCode || '').toUpperCase();
       debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
@@ -80,8 +85,12 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
 
       // Intentional leave: socket.leave() must not be treated as a disconnect.
       socket.leave(code);
-      if (!result.roomDeleted) {
-        io.to(code).emit('room_updated', rm.publicState(code, result.room.players[0]?.id));
+      if (result.roomDeleted) {
+        clearTimer(code);
+        debugLog('ROOM_DELETED', { roomCode: code, reason: 'last player left' });
+      } else {
+        if (result.hostChanged) debugLog('ROOM_HOST_TRANSFERRED', { roomCode: code, from: userId, to: result.newHostId });
+        io.to(code).emit('room_updated', rm.publicState(code, null));
       }
       socket.emit('room_left', { roomCode: code, roomDeleted: result.roomDeleted });
       debugLog('ROOM_PLAYER_LEFT', {
@@ -90,6 +99,32 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
         remainingPlayers: result.room.players.length,
         roomDeleted: result.roomDeleted,
       });
+    });
+
+    // ── return_to_room ─────────────────────────────────────────────────────
+    // "Back to Room" di Scoreboard: tetap menjadi anggota room, state set lama dibersihkan.
+    socket.on('return_to_room', ({ roomCode } = {}) => {
+      const code = String(roomCode || '').toUpperCase();
+      debugLog('RETURN_TO_ROOM_REQUEST', { userId, roomCode: code });
+      if (!socket.rooms.has(code)) {
+        socket.emit('return_room_error', { code: 'NOT_IN_ROOM' });
+        return socket.emit('error', { code: 'NOT_IN_ROOM' });
+      }
+      const result = rm.returnToRoom(code, userId);
+      if (!result.ok) {
+        debugLog('RETURN_TO_ROOM_REJECTED', { userId, roomCode: code, reason: result.error });
+        socket.emit('return_room_error', { code: result.error });
+        return socket.emit('error', { code: result.error });
+      }
+
+      if (result.reset) debugLog('ROOM_RESET_FOR_NEW_SET', { roomCode: code, trigger: 'return_to_room', userId });
+      debugLog('RETURN_TO_ROOM', {
+        userId, roomCode: code, status: result.room.status,
+        returned: result.room.players.filter(p => p.inRoom !== false).length,
+        players: result.room.players.length,
+      });
+      socket.emit('room_returned', rm.publicState(code, userId));
+      socket.to(code).emit('room_updated', rm.publicState(code, null));
     });
 
     // ── start_game ─────────────────────────────────────────────────────────
@@ -206,11 +241,15 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     }
 
     socket.join(code);
-    socket.emit('session_restored', { ...rm.publicState(code, userId), setResult: room.setResult || null });
+    socket.emit('session_restored', {
+      ...rm.publicState(code, userId),
+      setResult: room.setResult || null,
+      view: rm.restoreView(room, userId),   // 'game' | 'result' | 'room' — ditentukan server
+    });
     if (r.wasDisconnected) socket.to(code).emit('player_reconnected', { playerId: userId });
 
     debugLog('SESSION_RESTORED', {
-      userId, roomCode: code, status: room.status, socketId: socket.id,
+      userId, roomCode: code, status: room.status, view: rm.restoreView(room, userId), socketId: socket.id,
       wasDisconnected: r.wasDisconnected, replacedSockets: replaced,
       game: room.currentGame ? { gameNumber: room.currentGame.gameNumber, currentTurn: room.currentGame.currentTurn } : null,
     });
@@ -296,8 +335,9 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       clearTimer(roomCode);
       debugLog('SET_OVER', { roomCode, status: room.status, players: room.players.map(p => p.id) });
       io.to(roomCode).emit('set_over', {
-        rankings:  event.rankings,
-        setScores: event.setScores,
+        rankings:    event.rankings,
+        setScores:   event.setScores,
+        gameHistory: event.gameHistory,
       });
     } else {
       setTimeout(() => {

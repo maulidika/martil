@@ -28,11 +28,12 @@ function createRoom(hostId, maxGames = 4) {
     hostId,
     maxGames,
     status: 'waiting',
-    players: [{ id: hostId, connected: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() }],
+    players: [{ id: hostId, connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() }],
     setId: null,
     setScores: {},
     currentGame: null,
     gameHistory: [],
+    setResult: null,   // hasil set terakhir (dipertahankan sampai set baru dimulai)
   };
 
   rooms.set(code, room);
@@ -48,12 +49,33 @@ function createRoom(hostId, maxGames = 4) {
 function joinRoom(code, playerId) {
   const room = rooms.get(code);
   if (!room)                                       return { ok: false, error: 'ROOM_NOT_FOUND' };
-  if (room.status !== 'waiting')                   return { ok: false, error: 'GAME_ALREADY_STARTED' };
+  if (room.status === 'playing')                   return { ok: false, error: 'GAME_ALREADY_STARTED' };
   if (room.players.length >= 4)                    return { ok: false, error: 'ROOM_FULL' };
   if (room.players.find(p => p.id === playerId))   return { ok: false, error: 'ALREADY_IN_ROOM' };
 
-  room.players.push({ id: playerId, connected: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
-  return { ok: true, room };
+  // Room yang set-nya sudah selesai tetap bisa dimasuki pemain baru (kursi kosong setelah
+  // ada yang keluar): room kembali ke status waiting untuk set berikutnya.
+  const reset = room.status === 'done' ? _resetRoomForNewSet(room) : false;
+
+  room.players.push({ id: playerId, connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
+  return { ok: true, room, reset };
+}
+
+/**
+ * Bersihkan state set sebelumnya agar room siap untuk set baru.
+ * Keanggotaan, host, dan maxGames dipertahankan. room.setResult sengaja TIDAK dihapus:
+ * pemain yang masih berada di Scoreboard (belum menekan Back to Room) masih membutuhkannya
+ * bila refresh; hasil itu dibersihkan ketika set baru dimulai.
+ */
+function _resetRoomForNewSet(room) {
+  if (room.status !== 'done') return false;
+  room.status      = 'waiting';
+  room.setId       = null;
+  room.setScores   = {};
+  room.gameHistory = [];
+  room.currentGame = null;
+  db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('waiting', room.id);
+  return true;
 }
 
 function getRoom(code) {
@@ -67,6 +89,7 @@ function startSet(code) {
   if (!room)                       return { ok: false, error: 'ROOM_NOT_FOUND' };
   if (room.players.length !== 4)   return { ok: false, error: 'NEED_4_PLAYERS' };
   if (room.status !== 'waiting')   return { ok: false, error: 'ALREADY_STARTED' };
+  if (room.players.some(p => p.inRoom === false)) return { ok: false, error: 'PLAYERS_NOT_READY' };
 
   const playerIds = room.players.map(p => p.id);
   const setId = uuidv4();
@@ -75,6 +98,7 @@ function startSet(code) {
   room.setId    = setId;
   room.setScores = Object.fromEntries(playerIds.map(id => [id, 0]));
   room.gameHistory = [];
+  room.setResult   = null;
   room.currentGame = GameEngine.initGame(playerIds, 1, null);
 
   db().prepare('INSERT INTO sets (id, room_id) VALUES (?, ?)').run(setId, room.id);
@@ -162,8 +186,16 @@ function _handleGameOver(room, event) {
     event.setOver    = true;
     event.rankings   = rankings;
     event.setScores  = room.setScores;
-    // Disimpan agar pemain yang refresh/reconnect di Scoreboard bisa melihat hasil yang sama.
-    room.setResult   = { rankings, setScores: { ...room.setScores } };
+    // Hasil dibekukan (termasuk riwayat game) agar Scoreboard tidak berubah ketika room
+    // di-reset oleh pemain lain yang menekan Back to Room, dan bisa dipulihkan saat refresh.
+    room.setResult   = {
+      rankings,
+      setScores:   { ...room.setScores },
+      gameHistory: room.gameHistory.map(g => ({ ...g })),
+    };
+    event.gameHistory = room.setResult.gameHistory;
+    // Semua pemain sekarang berada di Scoreboard, belum kembali ke Room.
+    for (const p of room.players) p.inRoom = false;
   } else {
     // Next game — winner leads
     room.currentGame = GameEngine.initGame(
@@ -178,20 +210,67 @@ function _handleGameOver(room, event) {
 
 // ─── Disconnect / reconnect ──────────────────────────────────────────────────
 
+/** Pilih host pengganti: pemain yang terhubung dan sudah di Room didahulukan. */
+function _pickNextHost(room) {
+  return room.players.find(p => p.connected && p.inRoom !== false)
+      || room.players.find(p => p.connected)
+      || room.players[0]
+      || null;
+}
+
+/**
+ * Keluar dari room dengan sengaja (berbeda dari disconnect).
+ * Diizinkan saat room menunggu ('waiting') atau set sudah selesai ('done');
+ * ditolak saat game berjalan.
+ */
 function leaveRoom(code, playerId) {
   const room = rooms.get(code);
   if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
-  if (room.status !== 'done') return { ok: false, error: 'SET_NOT_FINISHED' };
+  if (room.status === 'playing') return { ok: false, error: 'GAME_IN_PROGRESS' };
 
   const playerIndex = room.players.findIndex(p => p.id === playerId);
   if (playerIndex === -1) return { ok: false, error: 'NOT_IN_ROOM' };
 
   room.players.splice(playerIndex, 1);
-  if (room.hostId === playerId) room.hostId = room.players[0]?.id || null;
+
+  let newHostId = null;
+  if (room.hostId === playerId) {
+    newHostId = _pickNextHost(room)?.id || null;
+    room.hostId = newHostId;
+  }
 
   const roomDeleted = room.players.length === 0;
-  if (roomDeleted) rooms.delete(code);
-  return { ok: true, room, roomDeleted };
+  if (roomDeleted) {
+    rooms.delete(code);
+    db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('closed', room.id);
+  }
+  return { ok: true, room, roomDeleted, hostChanged: !!newHostId && !roomDeleted, newHostId };
+}
+
+/**
+ * Kembali ke Room dari Scoreboard. Panggilan pertama mereset room ke 'waiting'
+ * (skor dan riwayat set lama dibersihkan, keanggotaan dipertahankan); panggilan
+ * berikutnya dari pemain lain hanya menandai mereka sudah kembali. Idempoten.
+ */
+function returnToRoom(code, playerId) {
+  const room = rooms.get(code);
+  if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
+  const p = room.players.find(p => p.id === playerId);
+  if (!p) return { ok: false, error: 'NOT_IN_ROOM' };
+  if (room.status === 'playing') return { ok: false, error: 'GAME_IN_PROGRESS' };
+
+  const reset = _resetRoomForNewSet(room);
+  p.inRoom = true;
+  return { ok: true, room, reset };
+}
+
+/** Halaman yang seharusnya dilihat pemain saat sesinya dipulihkan: 'game' | 'result' | 'room'. */
+function restoreView(room, playerId) {
+  if (room.status === 'playing') return 'game';
+  if (room.status === 'done') return 'result';
+  const me = room.players.find(p => p.id === playerId);
+  if (me && me.inRoom === false && room.setResult) return 'result';
+  return 'room';
 }
 
 function markDisconnected(code, playerId, socketId = null, now = Date.now()) {
@@ -343,7 +422,7 @@ function publicState(code, forPlayerId) {
     hostId:      room.hostId,
     status:      room.status,
     maxGames:    room.maxGames,
-    players:     room.players.map(p => ({ id: p.id, connected: p.connected })),
+    players:     room.players.map(p => ({ id: p.id, connected: p.connected, inRoom: p.inRoom !== false })),
     setScores:   room.setScores,
     gameHistory: room.gameHistory,
     game:        room.currentGame
@@ -365,6 +444,6 @@ function generateCode() {
 
 module.exports = {
   createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip,
-  leaveRoom, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
+  leaveRoom, returnToRoom, restoreView, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
   restartTurnClock, publicState, RECONNECT_WINDOW_MS,
 };

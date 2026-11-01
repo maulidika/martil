@@ -9,34 +9,41 @@ const PRIZE_COLOR = [C.green, C.green, C.red, C.red]
 
 export default function ResultPage() {
   const { setResult, user, roomInfo, roomCode, connected, setError, events, error } = useGameStore()
-  const [leaving, setLeaving] = React.useState(false)
+  // 'room' = menunggu jawaban Back to Room, 'menu' = menunggu jawaban Back to Menu Utama
+  const [busy, setBusy] = React.useState(null)
 
   React.useEffect(() => {
-    if (events[0]?.type === 'leave_room_error') setLeaving(false)
+    const t = events[0]?.type
+    if (t === 'leave_room_error' || t === 'return_room_error') setBusy(null)
   }, [events[0]?._id])
 
   const rankings = setResult?.rankings || []
   const setScores = setResult?.setScores || {}
+  // Riwayat dibekukan di setResult (tidak ikut berubah saat room di-reset pemain lain).
+  const history = setResult?.gameHistory ?? roomInfo?.gameHistory ?? []
 
-  function goLobby() {
-    if (leaving) return
+  // Dua aksi berbeda: Back to Room → return_to_room (tetap anggota, room direset),
+  // Back to Menu Utama → leave_room (keluar dari room sepenuhnya).
+  function sendRoomAction(kind, event, logName, failMsg) {
+    if (busy) return
     const code = roomCode || roomInfo?.code
     if (!code) {
       setError('Kode room tidak ditemukan. Coba refresh halaman.')
       return
     }
     if (!connected) {
-      setError('Koneksi ke server terputus. Tunggu tersambung sebelum keluar dari room.')
+      setError('Koneksi ke server terputus. Tunggu tersambung sebelum melanjutkan.')
       return
     }
-    console.info(`[MARTIL ${new Date().toISOString()}] LEAVE_ROOM_CLICKED`, { roomCode: code })
-    setLeaving(true)
-    const sent = emitSocket('leave_room', { roomCode: code })
-    if (!sent) {
-      setLeaving(false)
-      setError('Gagal mengirim permintaan keluar room. Periksa koneksi server.')
+    console.info(`[MARTIL ${new Date().toISOString()}] ${logName}`, { roomCode: code })
+    setBusy(kind)
+    if (!emitSocket(event, { roomCode: code })) {
+      setBusy(null)
+      setError(failMsg)
     }
   }
+  const goRoom = () => sendRoomAction('room', 'return_to_room', 'RETURN_TO_ROOM_CLICKED', 'Gagal mengirim permintaan kembali ke room. Periksa koneksi server.')
+  const goMenu = () => sendRoomAction('menu', 'leave_room', 'LEAVE_ROOM_CLICKED', 'Gagal mengirim permintaan keluar room. Periksa koneksi server.')
 
   return (
     <div style={{ minHeight:'100dvh', background:C.bg, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
@@ -80,11 +87,11 @@ export default function ResultPage() {
         </div>
 
         {/* Game-by-game history */}
-        {roomInfo?.gameHistory?.length > 0 && (
+        {history.length > 0 && (
           <div style={{ background:C.surface, borderRadius:12, padding:'1rem', marginBottom:16 }}>
             <div style={{ fontSize:13, fontWeight:600, color:C.text, marginBottom:10 }}>Riwayat Game</div>
-            {roomInfo.gameHistory.map((g, i) => (
-              <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:C.muted, paddingBlock:4, borderBottom:i < roomInfo.gameHistory.length-1 ? `1px solid #1a4a7a` : 'none' }}>
+            {history.map((g, i) => (
+              <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:C.muted, paddingBlock:4, borderBottom:i < history.length-1 ? `1px solid #1a4a7a` : 'none' }}>
                 <span>Game {g.gameNumber}</span>
                 <span>Menang: <b style={{ color:C.text }}>{g.winnerId?.slice(0,6)}</b></span>
                 <span>{g.scores.find(s => s.id === user?.id)?.score ?? '?'} poin</span>
@@ -94,12 +101,23 @@ export default function ResultPage() {
         )}
 
         <button
-          onClick={goLobby}
-          disabled={leaving}
-          style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:C.accent, color:'#fff', border:'none', cursor:'pointer' }}
+          onClick={goRoom}
+          disabled={!!busy}
+          style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:C.accent, color:'#fff', border:'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1, marginBottom:10 }}
         >
-          {leaving ? 'Keluar dari room…' : 'Kembali ke Lobby'}
+          {busy === 'room' ? 'Kembali ke room…' : 'Back to Room'}
         </button>
+        <button
+          onClick={goMenu}
+          disabled={!!busy}
+          style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:'#0f3460', color:C.text, border:'1px solid #1a4a7a', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }}
+        >
+          {busy === 'menu' ? 'Keluar dari room…' : 'Back to Menu Utama'}
+        </button>
+        <div style={{ fontSize:11, color:C.muted, textAlign:'center', marginTop:10, lineHeight:1.5 }}>
+          Back to Room: tetap di room ini dan menunggu pemain lain.<br />
+          Back to Menu Utama: keluar dari room.
+        </div>
       </div>
     </div>
   )
