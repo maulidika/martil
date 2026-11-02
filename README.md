@@ -150,6 +150,7 @@ NODE_ENV=development
 - ✅ Valid: `A-2-3-4-5`, `2-3-4-5-6`, `10-J-Q-K-A`
 - ❌ Tidak valid: `J-Q-K-A-2`, `Q-K-A-2-3`, `K-A-2-3-4`
 - **Kekuatan straight** dinilai dari kartu paling kanan pada urutan yang ditulis: `A-2-3-4-5` (terkecil, dihitung 5) < `2-3-4-5-6` (dihitung 6) < `3-4-5-6-7` < … < `10-J-Q-K-A` (terbesar). Berlaku juga untuk Straight Flush; jika kartu ujungnya sama rank, suit kartu ujung yang menentukan.
+- Di meja, A-2-3-4-5 dan 2-3-4-5-6 ditampilkan berurutan seperti ditulis (`displayOrder` di `comboDetector.js`); urutan kartu di tangan (3…K-A-2) dan data dari server tidak berubah.
 - Aturan ini harus identik di `backend/src/game/validator.js` dan `frontend/src/utils/comboDetector.js`; `npm run test:combo` (folder backend) memeriksa ±2,6 juta kombinasi di kedua sisi.
 
 ### Sistem Giliran
@@ -210,7 +211,7 @@ Backend adalah sumber kebenaran. Setiap kali socket tersambung (login, refresh, 
 
 | Event server → klien | Arti |
 |---|---|
-| `session_restored` | Snapshot lengkap (status room, kartu, giliran, meja, `timeLeft`, `setResult` bila Scoreboard). Klien menimpa seluruh state lalu pindah ke `/lobby`, `/game`, atau `/result` sesuai status. |
+| `session_restored` | (`view`: `game` / `result` / `room` ditentukan server) Snapshot lengkap (status room, kartu, giliran, meja, `timeLeft`, `setResult` bila Scoreboard). Klien menimpa seluruh state lalu pindah ke `/lobby`, `/game`, atau `/result` sesuai status. |
 | `session_none` `{reason}` | Tidak ada sesi: `NO_ROOM`, `EXPIRED` (terputus > 60 dtk di room waiting/done), atau `ROOM_CLOSED` (semua pemain terputus > 10 menit). |
 | `session_replaced` | Akun yang sama mengambil alih dari tab/perangkat lain. Tab lama melihat overlay dengan tombol "Pakai di tab ini". |
 | `player_disconnected` / `player_reconnected` | Hanya dikirim ke pemain lain; resume tidak mengirim ulang kartu atau state ke mereka. |

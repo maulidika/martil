@@ -1,0 +1,46 @@
+diff --git a5/frontend/src/hooks/useSocket.js b5/frontend/src/hooks/useSocket.js
+index 9a257c3..80cb426 100644
+--- a5/frontend/src/hooks/useSocket.js
++++ b5/frontend/src/hooks/useSocket.js
+@@ -149,8 +149,8 @@ export function useSocket() {
+         hasSetResult: !!state?.setResult, route, turn: state?.game?.currentTurn,
+       })
+       useGameStore.getState().applyRestoredSession(state)
+-      setSyncStatus('ok')
+       navigate(route, { replace: true })
++      setSyncStatus('ok') // overlay dilepas terakhir agar halaman perantara tidak sempat terlihat
+     })
+ 
+     s.on('session_none', ({ reason } = {}) => {
+diff --git a5/frontend/src/pages/LobbyPage.jsx b5/frontend/src/pages/LobbyPage.jsx
+index ca2a0ea..c183aef 100644
+--- a5/frontend/src/pages/LobbyPage.jsx
++++ b5/frontend/src/pages/LobbyPage.jsx
+@@ -49,14 +49,14 @@ export default function LobbyPage() {
+   // seharusnya berada di Scoreboard, bukan di Room. Berlaku untuk jalur apa pun yang membawanya ke sini
+   // (mis. refresh): dipulangkan ke /result dengan hasil dari server.
+   const me = players.find(p => p.id === user?.id)
++  const mustBeOnScoreboard = !!(myRoom && me && me.inRoom === false && (setResult || myRoom.setResult))
+   useEffect(() => {
+-    if (!myRoom || !me || me.inRoom !== false) return
++    if (!mustBeOnScoreboard) return
+     const result = setResult || myRoom.setResult
+-    if (!result) return
+     console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom.code })
+     if (!setResult) useGameStore.getState().setSetResult(result)
+     navigate('/result', { replace: true })
+-  }, [myRoom?.code, me?.inRoom, !!setResult])
++  }, [mustBeOnScoreboard])
+ 
+   // Exit Room gagal → aktifkan kembali tombol dan tampilkan pesan.
+   useEffect(() => {
+@@ -105,6 +105,9 @@ export default function LobbyPage() {
+     navigate('/login')
+   }
+ 
++  // Jangan menggambar Room sama sekali selama pemain sedang dipulangkan ke Scoreboard (tanpa kedipan).
++  if (mustBeOnScoreboard) return null
++
+   return (
+     <div style={s.wrap}>
+       {/* Header */}

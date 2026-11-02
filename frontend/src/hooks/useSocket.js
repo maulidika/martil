@@ -149,8 +149,8 @@ export function useSocket() {
         hasSetResult: !!state?.setResult, route, turn: state?.game?.currentTurn,
       })
       useGameStore.getState().applyRestoredSession(state)
-      setSyncStatus('ok')
       navigate(route, { replace: true })
+      setSyncStatus('ok') // overlay dilepas terakhir agar halaman perantara tidak sempat terlihat
     })
 
     s.on('session_none', ({ reason } = {}) => {
