@@ -6,12 +6,22 @@ export const SYNC_FAIL_AFTER_MS = 20_000
 /** Berapa lama menunggu jawaban server setelah resume_session sebelum dianggap gagal. */
 export const RESUME_TIMEOUT_MS = 8_000
 
-/** Halaman tujuan setelah server mengirim session_restored. */
+/**
+ * Halaman tujuan setelah server mengirim session_restored.
+ * Server menentukan `view` ('game' | 'result' | 'room'); logika status di bawah hanya
+ * cadangan bila payload tidak membawa `view`.
+ */
 export function routeForRestoredState(state) {
   if (!state) return '/lobby'
-  if (state.status === 'playing' && state.game) return '/game'
-  if (state.status === 'done' && state.setResult) return '/result'
-  return '/lobby'
+  switch (state.view) {
+    case 'game':   return state.game ? '/game' : '/lobby'
+    case 'result': return state.setResult ? '/result' : '/lobby'
+    case 'room':   return '/lobby'
+    default:
+      if (state.status === 'playing' && state.game) return '/game'
+      if (state.status === 'done' && state.setResult) return '/result'
+      return '/lobby'
+  }
 }
 
 /** Pesan untuk pemain ketika sesi tidak bisa dipulihkan. */
