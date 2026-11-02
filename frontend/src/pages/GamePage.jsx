@@ -1,9 +1,12 @@
-import React, { useEffect, useRef, useState, useCallback } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
 import { emitSocket } from '../hooks/useSocket'
 import GameSyncWaiting from '../components/GameSyncWaiting'
-import { detectCombo, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
+import { detectCombo, canBeat, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
+import { COMBO_TYPES, listAvailableCombos, activePickOf } from '../utils/comboPicker'
+import { mainDeckIds, isGroupSelected, anchorAbove } from '../utils/groupChain'
+import { INITIAL_UI, syncUi, reduceHandUi } from '../utils/handUi'
 
 /* ── palette ─────────────────────────────────────────────── */
 const C = {
@@ -15,14 +18,65 @@ const C = {
 export default function GamePage() {
   const navigate = useNavigate()
   const { user, roomCode, gameState, currentTurn, selectedIds,
-          toggleCard, clearSelection, events, roomInfo, connected, setError } = useGameStore()
+          setSelection, clearSelection, events, roomInfo, connected, setError } = useGameStore()
 
   const currentRoomCode = roomCode || roomInfo?.code
   const myTurn   = currentTurn === user?.id
   const myHand   = gameState?.myHand ? sortHand(gameState.myHand) : []
-  const selected = myHand.filter(c => selectedIds.includes(c.id))
+  const handIds  = myHand.map(c => c.id)
+  const handKey  = handIds.join(',')
+  const selIds   = handIds.filter(id => selectedIds.includes(id))
+  const selected = myHand.filter(c => selIds.includes(c.id))
   const combo    = detectCombo(selected)
   const tableTop = gameState?.table?.at(-1)
+  // Legalitas di sisi klien = aturan engine: kombinasi valid dan (bila meja terisi) mengalahkan kartu teratas.
+  // Server tetap memvalidasi ulang.
+  const tableCombo = tableTop ? detectCombo(tableTop.combo?.cards) : null
+  const beatsTable = !!combo && (!tableTop || (!!tableCombo && canBeat(combo, tableCombo)))
+  const canPlay    = connected && myTurn && beatsTable
+
+  /* ── layout responsif ─────────────────────────────────── */
+  const compact = useCompact(720)
+
+  /* ── interaksi tangan: seleksi, Combo Detector, Group Chain (logika murni di utils/handUi.js) ── */
+  const groupKey = `${currentRoomCode}:${gameState?.gameNumber}`
+  const [rawUi, setRawUi] = useState(INITIAL_UI)
+  const ui = useMemo(() => syncUi(rawUi, groupKey, handIds), [rawUi, groupKey, handKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (ui !== rawUi) setRawUi(ui) }, [ui, rawUi])
+  const act = (action) => {
+    const r = reduceHandUi(ui, selIds, handIds, action)
+    setRawUi(r.ui); setSelection(r.selIds)
+  }
+  const resetSel = () => act({ type: 'clear' })
+
+  const available = useMemo(() => listAvailableCombos(myHand), [handKey])   // eslint-disable-line react-hooks/exhaustive-deps
+  const activePick = activePickOf(ui.lastPick, available, selIds)
+  const groups = ui.groups
+  const deckIds   = mainDeckIds(handIds, groups)
+  const cardById  = Object.fromEntries(myHand.map(c => [c.id, c]))
+  const exactGroup = groups.some(g => g.length === selIds.length && isGroupSelected(g, selIds))
+
+  /* ── posisi tombol GROUP / UNGROUP (diukur dari DOM) ─────── */
+  const wrapRef = useRef(null)
+  const cardEls = useRef(new Map())
+  const setCardEl = (id) => (el) => { if (el) cardEls.current.set(id, el); else cardEls.current.delete(id) }
+  const [anchors, setAnchors] = useState({ group: null, ungroup: [] })
+  const selKey = selIds.join(','), groupsKey = groups.map(g => g.join('.')).join('|')
+  useLayoutEffect(() => {
+    const wrap = wrapRef.current
+    const rectOf = (id) => {
+      const el = cardEls.current.get(id)
+      return el && wrap ? { ...offsetWithin(el, wrap), width: el.offsetWidth } : null
+    }
+    const group = wrap && selIds.length >= 2 && !exactGroup ? anchorAbove(selIds.map(rectOf).filter(Boolean)) : null
+    const ungroup = wrap ? groups.map((g, index) => {
+      if (!isGroupSelected(g, selIds)) return null
+      const a = anchorAbove(g.map(rectOf).filter(Boolean))
+      return a && { index, ...a }
+    }).filter(Boolean) : []
+    const next = { group, ungroup }
+    setAnchors(prev => JSON.stringify(prev) === JSON.stringify(next) ? prev : next)
+  }, [selKey, groupsKey, handKey, compact])   // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ── timer ──────────────────────────────────────────────── */
   const [timeLeft, setTimeLeft] = useState(30)
@@ -51,24 +105,26 @@ export default function GamePage() {
   }, [events[0]?._id])
 
   /* ── actions ─────────────────────────────────────────────── */
-  const handlePlay = useCallback(() => {
+  // Fungsi biasa (bukan useCallback): selalu memakai ui/seleksi terbaru dari render ini.
+  const handlePlay = () => {
     if (!currentRoomCode) return setError('Room code tidak tersedia')
     if (!myTurn) return setError('Bukan giliranmu')
     if (!combo) return setError('Kombinasi tidak valid')
+    if (!beatsTable) return setError('Kombinasi tidak bisa mengalahkan meja')
     if (!connected) return setError('Belum terkoneksi ke server')
 
-    emitSocket('play_cards', { roomCode: currentRoomCode, cardIds: selectedIds })
-    clearSelection()
-  }, [combo, connected, currentRoomCode, myTurn, selectedIds, setError])
+    emitSocket('play_cards', { roomCode: currentRoomCode, cardIds: selIds })
+    resetSel()   // grup yang kartunya dimainkan bubar otomatis saat tangan diperbarui server (syncUi)
+  }
 
-  const handleSkip = useCallback(() => {
+  const handleSkip = () => {
     if (!currentRoomCode) return setError('Room code tidak tersedia')
     if (!myTurn) return setError('Bukan giliranmu')
     if (!connected) return setError('Belum terkoneksi ke server')
 
     emitSocket('skip_turn', { roomCode: currentRoomCode })
-    clearSelection()
-  }, [connected, currentRoomCode, myTurn, setError])
+    resetSel()
+  }
 
   if (!gameState) return <GameSyncWaiting />
 
@@ -138,45 +194,95 @@ export default function GamePage() {
           ⏱ {timeLeft}s
         </div>
         {combo && (
-          <div style={{ fontSize:12, color:C.green, fontWeight:600 }}>✓ {combo.label}</div>
+          <div style={{ fontSize:12, color: beatsTable ? C.green : C.muted, fontWeight:600 }}>{beatsTable ? '✓ ' : ''}{combo.label}</div>
+        )}
+        {combo && tableTop && !beatsTable && (
+          <div style={{ fontSize:12, color:C.yellow }}>Tidak bisa mengalahkan meja</div>
         )}
         {selected.length > 0 && !combo && (
           <div style={{ fontSize:12, color:C.accent }}>Kombinasi tidak valid</div>
         )}
       </div>
 
-      {/* Hand */}
-      <div style={{ flexShrink:0, padding:'4px 0 6px', overflowX:'auto' }}>
-        <div style={{ display:'flex', justifyContent:'center', paddingInline:12, minHeight:72 }}>
-          {myHand.map((card, i) => (
-            <CardTile
-              key={card.id}
-              card={card}
-              size="lg"
-              selected={selectedIds.includes(card.id)}
-              onTap={myTurn ? () => toggleCard(card.id) : undefined}
-              overlap={i > 0}
-            />
-          ))}
-        </div>
-      </div>
+      {/* Hand zone: [Combo Detector + CLEAR] [dek utama | grup] [AUTO SKIP PLAY HINT] */}
+      <div style={{ flexShrink:0, padding:'2px 8px 16px' }}>
+        {compact && <DetectorPanel available={available} activePick={activePick} onPick={(kind) => act({ type: 'detector', available, kind })} compact />}
 
-      {/* Action buttons */}
-      <div style={{ display:'flex', gap:10, padding:'8px 16px 20px', flexShrink:0 }}>
-        <button
-          onClick={handleSkip}
-          disabled={!connected || !myTurn}
-          style={{ ...actionBtn, flex:1, background:C.deep, color: (connected && myTurn) ? C.text : C.muted, border:`1px solid ${C.border}` }}
-        >
-          Skip
-        </button>
-        <button
-          onClick={handlePlay}
-          disabled={!connected || !combo || !myTurn}
-          style={{ ...actionBtn, flex:2, background: (connected && combo && myTurn) ? C.accent : '#333', color: (connected && combo && myTurn) ? '#fff' : C.muted }}
-        >
-          {selected.length > 0 ? `Main (${selected.length} kartu)` : 'Pilih kartu'}
-        </button>
+        <div style={{ display:'flex', alignItems:'stretch', gap:8 }}>
+          {!compact && (
+            <div style={{ width:152, flexShrink:0, display:'flex', flexDirection:'column', justifyContent:'space-between', gap:8 }}>
+              <DetectorPanel available={available} activePick={activePick} onPick={(kind) => act({ type: 'detector', available, kind })} />
+              <ClearButton onClick={resetSel} disabled={selIds.length === 0} />
+            </div>
+          )}
+
+          <div style={{ flex:1, minWidth:0, overflowX:'auto', display:'flex' }}>
+            <div ref={wrapRef} style={{ position:'relative', display:'flex', alignItems:'flex-end', gap:14, margin:'0 auto', padding:'52px 12px 4px' }}>
+              {/* Dek utama */}
+              <div style={{ display:'flex', minHeight:60 }}>
+                {deckIds.map((id, i) => (
+                  <CardTile
+                    key={id} card={cardById[id]} size="lg" overlap={i > 0}
+                    innerRef={setCardEl(id)}
+                    selected={selIds.includes(id)}
+                    onTap={() => act({ type: 'tapCard', id })}
+                  />
+                ))}
+              </div>
+
+              {/* Group Chain (kanan dek utama, kartu lebih kecil dan abu-abu) */}
+              {groups.length > 0 && (
+                <div style={{ display:'flex', alignItems:'flex-end', gap:8, paddingLeft:10, borderLeft:'1px dashed #35507a' }}>
+                  {groups.map((g, gi) => (
+                    <div key={g.join('.')} style={{
+                      display:'flex', padding:'3px 4px', borderRadius:8,
+                      border:`1px solid ${isGroupSelected(g, selIds) ? C.accent : '#4a5a78'}`,
+                      background:'rgba(255,255,255,0.06)',
+                    }}>
+                      {g.map((id, i) => (
+                        <CardTile
+                          key={id} card={cardById[id]} size="sm" grouped overlap={i > 0}
+                          innerRef={setCardEl(id)}
+                          selected={selIds.includes(id)}
+                          onTap={() => act({ type: 'tapGroup', index: gi })}
+                        />
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Tombol GROUP / UNGROUP di atas kartu terkait */}
+              {(() => {
+                const overlap = anchors.group && anchors.ungroup.some(u => Math.abs(u.x - anchors.group.x) < 84)
+                return (
+                  <>
+                    {anchors.group && (
+                      <FloatBtn x={anchors.group.x + (overlap ? -44 : 0)} y={anchors.group.y} onClick={() => act({ type: 'group' })} bg={C.accent}>GROUP</FloatBtn>
+                    )}
+                    {anchors.ungroup.map(u => (
+                      <FloatBtn key={u.index} x={u.x + (overlap ? 44 : 0)} y={u.y} onClick={() => act({ type: 'ungroup', index: u.index })} bg={C.deep}>UNGROUP</FloatBtn>
+                    ))}
+                  </>
+                )
+              })()}
+            </div>
+          </div>
+
+          {!compact && (
+            <Controls onSkip={handleSkip} onPlay={handlePlay}
+              skipDisabled={!connected || !myTurn} playDisabled={!canPlay} count={selIds.length} />
+          )}
+        </div>
+
+        {compact && (
+          <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:6 }}>
+            <ClearButton onClick={resetSel} disabled={selIds.length === 0} />
+            <div style={{ flex:1 }} />
+            <Controls row onSkip={handleSkip} onPlay={handlePlay}
+              skipDisabled={!connected || !myTurn} playDisabled={!canPlay} count={selIds.length} />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -203,25 +309,30 @@ function OpponentBox({ opponent, isActive, setScores, userId }) {
   )
 }
 
-function CardTile({ card, selected, onTap, size = 'lg', overlap }) {
+function CardTile({ card, selected, onTap, size = 'lg', overlap, grouped, innerRef }) {
   const red = IS_RED[card.suit]
-  const dim = size === 'lg' ? { w:42, h:60, fs:14, fss:12 } : { w:34, h:48, fs:12, fss:10 }
+  const dim = size === 'lg' ? { w:42, h:60, fs:14, fss:12, ov:16 }
+            : size === 'sm' ? { w:30, h:42, fs:11, fss:9,  ov:12 }
+            :                 { w:34, h:48, fs:12, fss:10, ov:16 }
+  // Kartu dalam grup: lebih kecil dan agak abu-abu; saat terpilih tampil menonjol seperti kartu dek utama.
+  const gray = grouped && !selected
 
   return (
     <div
+      ref={innerRef}
       onClick={onTap}
       style={{
         width: dim.w, height: dim.h, flexShrink:0,
-        background: selected ? '#1e3a5f' : '#fff',
-        border: `1.5px solid ${selected ? C.accent : '#ccc'}`,
+        background: selected ? '#1e3a5f' : gray ? '#c9cdd6' : '#fff',
+        border: `1.5px solid ${selected ? C.accent : gray ? '#9097a3' : '#ccc'}`,
         borderRadius: 6,
         display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
         gap:1,
-        color: red ? '#c0392b' : '#1a1a2e',
+        color: gray ? (red ? '#9b5a55' : '#3d4350') : (red ? '#c0392b' : '#1a1a2e'),
         cursor: onTap ? 'pointer' : 'default',
         transform: selected ? 'translateY(-14px)' : 'translateY(0)',
         transition: 'transform 0.12s, border-color 0.12s',
-        marginLeft: overlap ? -16 : 0,
+        marginLeft: overlap ? -dim.ov : 0,
         boxShadow: selected ? `0 4px 12px rgba(233,69,96,0.4)` : '0 1px 4px rgba(0,0,0,0.2)',
         zIndex: selected ? 10 : 1,
         position:'relative',
@@ -233,13 +344,99 @@ function CardTile({ card, selected, onTap, size = 'lg', overlap }) {
   )
 }
 
+/** Combo Detector: jenis kombinasi yang bisa dibentuk dari tangan (dek utama + grup). */
+function DetectorPanel({ available, activePick, onPick, compact }) {
+  const types = COMBO_TYPES.filter(t => available[t.key]?.length)
+  if (!types.length) return null
+  return (
+    <div style={compact
+      ? { display:'flex', gap:6, overflowX:'auto', padding:'0 0 6px' }
+      : { display:'grid', gridTemplateColumns:'1fr 1fr', gap:4 }}>
+      {types.map(t => {
+        const on = activePick?.type === t.key
+        return (
+          <button key={t.key} onClick={() => onPick(t.key)} title={`Pilih ${t.label} (klik lagi: berikutnya)`}
+            style={{
+              flexShrink:0, padding:'5px 6px', fontSize:11, fontWeight:600, borderRadius:7, cursor:'pointer',
+              background: on ? C.accent : C.deep, color: on ? '#fff' : C.text,
+              border:`1px solid ${on ? C.accent : C.border}`, whiteSpace:'nowrap',
+            }}>
+            {t.label}{on ? ` ${activePick.index + 1}/${available[t.key].length}` : ''}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function ClearButton({ onClick, disabled }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+      style={{ ...smallBtn, background:'transparent', color: disabled ? C.muted : C.text, border:`1px solid ${C.border}`, opacity: disabled ? 0.5 : 1 }}>
+      CLEAR
+    </button>
+  )
+}
+
+/** Kolom kanan: AUTO (placeholder), SKIP, PLAY, HINT (placeholder). */
+function Controls({ row, onSkip, onPlay, skipDisabled, playDisabled, count }) {
+  const placeholder = (label) => (
+    <button disabled title="Segera hadir" style={{ ...smallBtn, background:'#222', color:'#666', border:'1px solid #2a2a3a' }}>{label}</button>
+  )
+  return (
+    <div style={row
+      ? { display:'flex', gap:6, alignItems:'center' }
+      : { width:88, flexShrink:0, display:'flex', flexDirection:'column', justifyContent:'space-between', gap:6 }}>
+      {placeholder('AUTO')}
+      <button onClick={onSkip} disabled={skipDisabled}
+        style={{ ...smallBtn, background:C.deep, color: skipDisabled ? C.muted : C.text, border:`1px solid ${C.border}` }}>SKIP</button>
+      <button onClick={onPlay} disabled={playDisabled}
+        style={{ ...smallBtn, fontSize:13, padding: row ? '8px 14px' : '12px 0', background: playDisabled ? '#333' : C.accent, color: playDisabled ? C.muted : '#fff' }}>
+        PLAY{count > 0 ? ` (${count})` : ''}
+      </button>
+      {placeholder('HINT')}
+    </div>
+  )
+}
+
+// Tombol melayang di atas kartu (GROUP / UNGROUP). Kartu terpilih terangkat 14px, tombol setinggi 26px + jarak 4px.
+function FloatBtn({ x, y, onClick, bg, children }) {
+  return (
+    <button onClick={onClick}
+      style={{
+        position:'absolute', left:Math.max(x, 40), top:y - 44, transform:'translateX(-50%)', zIndex:30,
+        height:26, padding:'0 10px', fontSize:11, fontWeight:700, borderRadius:7, border:`1px solid ${C.border}`,
+        background:bg, color:'#fff', cursor:'pointer', whiteSpace:'nowrap', boxShadow:'0 2px 8px rgba(0,0,0,0.4)',
+      }}>{children}</button>
+  )
+}
+
 /* ── Helpers ──────────────────────────────────────────────── */
 
 function flex(j) { return { display:'flex', alignItems:'center', justifyContent:j } }
 
-const actionBtn = {
-  padding:'13px 0', borderRadius:10, fontSize:15, fontWeight:600,
+const smallBtn = {
+  padding:'8px 10px', borderRadius:8, fontSize:11, fontWeight:700,
   border:'none', cursor:'pointer', transition:'background 0.15s, opacity 0.15s',
+}
+
+// Posisi elemen relatif terhadap wadah (offsetLeft/Top mengabaikan transform, jadi tidak terganggu animasi angkat kartu).
+function offsetWithin(el, wrap) {
+  let left = 0, top = 0, n = el
+  while (n && n !== wrap) { left += n.offsetLeft; top += n.offsetTop; n = n.offsetParent }
+  return { left, top }
+}
+
+// Layar sempit (HP): Combo Detector pindah ke baris di atas dek, kontrol ke baris di bawah.
+function useCompact(breakpoint) {
+  const get = () => typeof window !== 'undefined' && window.innerWidth < breakpoint
+  const [compact, setCompact] = useState(get)
+  useEffect(() => {
+    const on = () => setCompact(get())
+    window.addEventListener('resize', on)
+    return () => window.removeEventListener('resize', on)
+  }, [breakpoint])   // eslint-disable-line react-hooks/exhaustive-deps
+  return compact
 }
 
 function toastMsg(ev, myId) {

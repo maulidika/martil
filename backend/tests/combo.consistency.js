@@ -53,9 +53,10 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
   console.log('  PASS  sortHand tetap 3 < … < K < A < 2');
 
   // 3) Seluruh kombinasi
-  let total = 0; const bad = [];
+  let total = 0; const bad = []; const valid = [];   // valid: semua kombinasi sah (untuk uji canBeat)
   const check = (cards) => {
     total++;
+    if (server(cards)) valid.push(cards);
     const a = kind(server(cards)), b = kind(client.detectCombo(cards));
     if (a !== b && bad.length < 10) bad.push(`${cards.map(c => c.id).join(' ')} → server=${a} klien=${b}`);
     else if (a !== b) bad.push(null);
@@ -68,6 +69,27 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
     for (let d = c+1; d < n; d++) for (let e = d+1; e < n; e++) check([deck[a], deck[b], deck[c], deck[d], deck[e]]);
   assert.equal(bad.length, 0, `${bad.length} kombinasi tidak konsisten, contoh:\n   ${bad.filter(Boolean).join('\n   ')}`);
   console.log(`  PASS  ${total.toLocaleString('id-ID')} kombinasi: server dan klien identik`);
+
+  // 3b) canBeat: klien (dipakai tombol PLAY dan urutan Combo Detector) harus sama dengan server
+  const byLen = (n) => valid.filter(c => c.length === n);
+  let seedN = 987654321;
+  const rnd = () => (seedN = (seedN * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+  const beat = (x, y) => [canBeat(server(x), server(y)), client.canBeat(client.detectCombo(x), client.detectCombo(y))];
+  let pairsChecked = 0; const badBeat = [];
+  const cmp = (x, y) => {
+    pairsChecked++;
+    const [a, b] = beat(x, y);
+    if (a !== b && badBeat.length < 10) badBeat.push(`${x.map(c => c.id)} vs ${y.map(c => c.id)} → server=${a} klien=${b}`);
+  };
+  for (const n of [1, 2, 3]) { const L = byLen(n); for (const x of L) for (const y of L) cmp(x, y); }   // semua pasangan
+  for (let i = 0; i < 400; i++) cmp(valid[Math.floor(rnd() * valid.length)], valid[Math.floor(rnd() * valid.length)]);   // lintas jenis
+  const five = byLen(5);
+  for (let i = 0; i < 300000; i++) cmp(five[Math.floor(rnd() * five.length)], five[Math.floor(rnd() * five.length)]);
+  // sama subtype dan sama kartu penentu (selisih hanya kartu pendamping): tidak ada yang mengalahkan
+  const fk = five.filter(c => server(c).subtype === 'fourofakind').slice(0, 200);
+  for (const x of fk) for (const y of fk.slice(0, 20)) cmp(x, y);
+  assert.equal(badBeat.length, 0, `canBeat tidak konsisten:\n   ${badBeat.join('\n   ')}`);
+  console.log(`  PASS  canBeat: server dan klien identik pada ${pairsChecked.toLocaleString('id-ID')} pasangan (semua single/pair/tris + sampel paketan & lintas jenis)`);
 
   // 4) Urutan kekuatan straight: dinilai dari kartu paling kanan yang ditulis
   //    A-2-3-4-5 < 2-3-4-5-6 < 3-4-5-6-7 < … < 10-J-Q-K-A

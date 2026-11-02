@@ -113,3 +113,70 @@ export function displayOrder(combo) {
   const written = LOW_STRAIGHT_DISPLAY.find(seq => ranks.size === 5 && seq.every(r => ranks.has(r)))
   return written ? written.map(r => cards.find(c => c.rank === r)) : cards
 }
+
+// ── Perbandingan kekuatan (cermin canBeat/compareCombo di backend/src/game/validator.js) ──
+// Dipakai hanya untuk umpan balik instan di UI (tombol PLAY, urutan Combo Detector);
+// server tetap memvalidasi segalanya. Diuji identik dengan server di backend/tests/combo.consistency.js.
+const PAKETAN_TIER = { straight: 1, flush: 2, fullhouse: 3, fourofakind: 4, straightflush: 5, royalflush: 6 }
+const LOW_STRAIGHT_TOP = { '3,4,5,A,2': '5', '3,4,5,6,2': '6' }
+
+// Detail kekuatan sebuah kombinasi hasil detectCombo().
+function strength(combo) {
+  const cards = [...combo.cards].sort(compareCards)
+  const ranks = cards.map(c => c.rank)
+  const counts = ranks.reduce((a, r) => { a[r] = (a[r] || 0) + 1; return a }, {})
+  const rankWith = (n) => Object.keys(counts).find(r => counts[r] === n)
+  const topRank = LOW_STRAIGHT_TOP[ranks.join(',')]
+  const highCard = topRank ? cards.find(c => c.rank === topRank) : cards[4]
+  switch (combo.type) {
+    case 'single': return { cards }
+    case 'pair':   return { rank: cards[0].rank, cards }
+    case 'tris':   return { rank: cards[0].rank, cards }
+    default:
+      return {
+        tier: PAKETAN_TIER[combo.subtype], subtype: combo.subtype, suit: cards[0].suit,
+        highCard, threeRank: rankWith(3), fourRank: rankWith(4), cards,
+      }
+  }
+}
+
+function compareSameSubtype(a, b) {
+  switch (a.subtype) {
+    case 'straight': case 'straightflush': case 'royalflush':
+      return compareCards(a.highCard, b.highCard)
+    case 'flush': {
+      const sv = SV[a.suit] - SV[b.suit]
+      return sv !== 0 ? sv : compareCards(a.highCard, b.highCard)
+    }
+    case 'fullhouse':   return RV[a.threeRank] - RV[b.threeRank]
+    case 'fourofakind': return RV[a.fourRank] - RV[b.fourRank]
+    default: return 0
+  }
+}
+
+// >0 jika a lebih kuat dari b, 0 sama kuat, <0 lebih lemah. Hanya bermakna untuk tipe yang sama.
+export function compareCombos(a, b) {
+  const x = strength(a), y = strength(b)
+  if (a.type === 'single') return compareCards(x.cards[0], y.cards[0])
+  if (a.type === 'pair') {
+    const rv = RV[x.rank] - RV[y.rank]
+    if (rv !== 0) return rv
+    return compareCards(x.cards[1], y.cards[1])   // kartu tertinggi pasangan
+  }
+  if (a.type === 'tris') return RV[x.rank] - RV[y.rank]
+  if (x.tier !== y.tier) return x.tier - y.tier
+  return compareSameSubtype(x, y)
+}
+
+// Apakah `play` boleh dimainkan di atas `table` (meja kosong = selalu boleh).
+export function canBeat(play, table) {
+  if (!play) return false
+  if (!table) return true
+  if (play.type !== table.type) return false
+  if (play.type === 'paketan') {
+    const x = strength(play), y = strength(table)
+    if (x.tier !== y.tier) return x.tier > y.tier
+    return compareSameSubtype(x, y) > 0
+  }
+  return compareCombos(play, table) > 0
+}

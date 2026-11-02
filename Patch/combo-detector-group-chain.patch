@@ -1,0 +1,1135 @@
+diff --git a/backend/tests/combo.consistency.js b/backend/tests/combo.consistency.js
+index 3b9789e..39f698d 100644
+--- a/backend/tests/combo.consistency.js
++++ b/backend/tests/combo.consistency.js
+@@ -53,9 +53,10 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
+   console.log('  PASS  sortHand tetap 3 < … < K < A < 2');
+ 
+   // 3) Seluruh kombinasi
+-  let total = 0; const bad = [];
++  let total = 0; const bad = []; const valid = [];   // valid: semua kombinasi sah (untuk uji canBeat)
+   const check = (cards) => {
+     total++;
++    if (server(cards)) valid.push(cards);
+     const a = kind(server(cards)), b = kind(client.detectCombo(cards));
+     if (a !== b && bad.length < 10) bad.push(`${cards.map(c => c.id).join(' ')} → server=${a} klien=${b}`);
+     else if (a !== b) bad.push(null);
+@@ -69,6 +70,27 @@ const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
+   assert.equal(bad.length, 0, `${bad.length} kombinasi tidak konsisten, contoh:\n   ${bad.filter(Boolean).join('\n   ')}`);
+   console.log(`  PASS  ${total.toLocaleString('id-ID')} kombinasi: server dan klien identik`);
+ 
++  // 3b) canBeat: klien (dipakai tombol PLAY dan urutan Combo Detector) harus sama dengan server
++  const byLen = (n) => valid.filter(c => c.length === n);
++  let seedN = 987654321;
++  const rnd = () => (seedN = (seedN * 1664525 + 1013904223) >>> 0) / 2 ** 32;
++  const beat = (x, y) => [canBeat(server(x), server(y)), client.canBeat(client.detectCombo(x), client.detectCombo(y))];
++  let pairsChecked = 0; const badBeat = [];
++  const cmp = (x, y) => {
++    pairsChecked++;
++    const [a, b] = beat(x, y);
++    if (a !== b && badBeat.length < 10) badBeat.push(`${x.map(c => c.id)} vs ${y.map(c => c.id)} → server=${a} klien=${b}`);
++  };
++  for (const n of [1, 2, 3]) { const L = byLen(n); for (const x of L) for (const y of L) cmp(x, y); }   // semua pasangan
++  for (let i = 0; i < 400; i++) cmp(valid[Math.floor(rnd() * valid.length)], valid[Math.floor(rnd() * valid.length)]);   // lintas jenis
++  const five = byLen(5);
++  for (let i = 0; i < 300000; i++) cmp(five[Math.floor(rnd() * five.length)], five[Math.floor(rnd() * five.length)]);
++  // sama subtype dan sama kartu penentu (selisih hanya kartu pendamping): tidak ada yang mengalahkan
++  const fk = five.filter(c => server(c).subtype === 'fourofakind').slice(0, 200);
++  for (const x of fk) for (const y of fk.slice(0, 20)) cmp(x, y);
++  assert.equal(badBeat.length, 0, `canBeat tidak konsisten:\n   ${badBeat.join('\n   ')}`);
++  console.log(`  PASS  canBeat: server dan klien identik pada ${pairsChecked.toLocaleString('id-ID')} pasangan (semua single/pair/tris + sampel paketan & lintas jenis)`);
++
+   // 4) Urutan kekuatan straight: dinilai dari kartu paling kanan yang ditulis
+   //    A-2-3-4-5 < 2-3-4-5-6 < 3-4-5-6-7 < … < 10-J-Q-K-A
+   const seqs = [
+diff --git a/frontend/src/pages/GamePage.jsx b/frontend/src/pages/GamePage.jsx
+index b90b512..7bd3e4d 100644
+--- a/frontend/src/pages/GamePage.jsx
++++ b/frontend/src/pages/GamePage.jsx
+@@ -1,9 +1,12 @@
+-import React, { useEffect, useRef, useState, useCallback } from 'react'
++import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+ import { useNavigate } from 'react-router-dom'
+ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
+ import GameSyncWaiting from '../components/GameSyncWaiting'
+-import { detectCombo, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
++import { detectCombo, canBeat, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
++import { COMBO_TYPES, listAvailableCombos, activePickOf } from '../utils/comboPicker'
++import { mainDeckIds, isGroupSelected, anchorAbove } from '../utils/groupChain'
++import { INITIAL_UI, syncUi, reduceHandUi } from '../utils/handUi'
+ 
+ /* ── palette ─────────────────────────────────────────────── */
+ const C = {
+@@ -15,14 +18,65 @@ const C = {
+ export default function GamePage() {
+   const navigate = useNavigate()
+   const { user, roomCode, gameState, currentTurn, selectedIds,
+-          toggleCard, clearSelection, events, roomInfo, connected, setError } = useGameStore()
++          setSelection, clearSelection, events, roomInfo, connected, setError } = useGameStore()
+ 
+   const currentRoomCode = roomCode || roomInfo?.code
+   const myTurn   = currentTurn === user?.id
+   const myHand   = gameState?.myHand ? sortHand(gameState.myHand) : []
+-  const selected = myHand.filter(c => selectedIds.includes(c.id))
++  const handIds  = myHand.map(c => c.id)
++  const handKey  = handIds.join(',')
++  const selIds   = handIds.filter(id => selectedIds.includes(id))
++  const selected = myHand.filter(c => selIds.includes(c.id))
+   const combo    = detectCombo(selected)
+   const tableTop = gameState?.table?.at(-1)
++  // Legalitas di sisi klien = aturan engine: kombinasi valid dan (bila meja terisi) mengalahkan kartu teratas.
++  // Server tetap memvalidasi ulang.
++  const tableCombo = tableTop ? detectCombo(tableTop.combo?.cards) : null
++  const beatsTable = !!combo && (!tableTop || (!!tableCombo && canBeat(combo, tableCombo)))
++  const canPlay    = connected && myTurn && beatsTable
++
++  /* ── layout responsif ─────────────────────────────────── */
++  const compact = useCompact(720)
++
++  /* ── interaksi tangan: seleksi, Combo Detector, Group Chain (logika murni di utils/handUi.js) ── */
++  const groupKey = `${currentRoomCode}:${gameState?.gameNumber}`
++  const [rawUi, setRawUi] = useState(INITIAL_UI)
++  const ui = useMemo(() => syncUi(rawUi, groupKey, handIds), [rawUi, groupKey, handKey])   // eslint-disable-line react-hooks/exhaustive-deps
++  useEffect(() => { if (ui !== rawUi) setRawUi(ui) }, [ui, rawUi])
++  const act = (action) => {
++    const r = reduceHandUi(ui, selIds, handIds, action)
++    setRawUi(r.ui); setSelection(r.selIds)
++  }
++  const resetSel = () => act({ type: 'clear' })
++
++  const available = useMemo(() => listAvailableCombos(myHand), [handKey])   // eslint-disable-line react-hooks/exhaustive-deps
++  const activePick = activePickOf(ui.lastPick, available, selIds)
++  const groups = ui.groups
++  const deckIds   = mainDeckIds(handIds, groups)
++  const cardById  = Object.fromEntries(myHand.map(c => [c.id, c]))
++  const exactGroup = groups.some(g => g.length === selIds.length && isGroupSelected(g, selIds))
++
++  /* ── posisi tombol GROUP / UNGROUP (diukur dari DOM) ─────── */
++  const wrapRef = useRef(null)
++  const cardEls = useRef(new Map())
++  const setCardEl = (id) => (el) => { if (el) cardEls.current.set(id, el); else cardEls.current.delete(id) }
++  const [anchors, setAnchors] = useState({ group: null, ungroup: [] })
++  const selKey = selIds.join(','), groupsKey = groups.map(g => g.join('.')).join('|')
++  useLayoutEffect(() => {
++    const wrap = wrapRef.current
++    const rectOf = (id) => {
++      const el = cardEls.current.get(id)
++      return el && wrap ? { ...offsetWithin(el, wrap), width: el.offsetWidth } : null
++    }
++    const group = wrap && selIds.length >= 2 && !exactGroup ? anchorAbove(selIds.map(rectOf).filter(Boolean)) : null
++    const ungroup = wrap ? groups.map((g, index) => {
++      if (!isGroupSelected(g, selIds)) return null
++      const a = anchorAbove(g.map(rectOf).filter(Boolean))
++      return a && { index, ...a }
++    }).filter(Boolean) : []
++    const next = { group, ungroup }
++    setAnchors(prev => JSON.stringify(prev) === JSON.stringify(next) ? prev : next)
++  }, [selKey, groupsKey, handKey, compact])   // eslint-disable-line react-hooks/exhaustive-deps
+ 
+   /* ── timer ──────────────────────────────────────────────── */
+   const [timeLeft, setTimeLeft] = useState(30)
+@@ -51,24 +105,26 @@ export default function GamePage() {
+   }, [events[0]?._id])
+ 
+   /* ── actions ─────────────────────────────────────────────── */
+-  const handlePlay = useCallback(() => {
++  // Fungsi biasa (bukan useCallback): selalu memakai ui/seleksi terbaru dari render ini.
++  const handlePlay = () => {
+     if (!currentRoomCode) return setError('Room code tidak tersedia')
+     if (!myTurn) return setError('Bukan giliranmu')
+     if (!combo) return setError('Kombinasi tidak valid')
++    if (!beatsTable) return setError('Kombinasi tidak bisa mengalahkan meja')
+     if (!connected) return setError('Belum terkoneksi ke server')
+ 
+-    emitSocket('play_cards', { roomCode: currentRoomCode, cardIds: selectedIds })
+-    clearSelection()
+-  }, [combo, connected, currentRoomCode, myTurn, selectedIds, setError])
++    emitSocket('play_cards', { roomCode: currentRoomCode, cardIds: selIds })
++    resetSel()   // grup yang kartunya dimainkan bubar otomatis saat tangan diperbarui server (syncUi)
++  }
+ 
+-  const handleSkip = useCallback(() => {
++  const handleSkip = () => {
+     if (!currentRoomCode) return setError('Room code tidak tersedia')
+     if (!myTurn) return setError('Bukan giliranmu')
+     if (!connected) return setError('Belum terkoneksi ke server')
+ 
+     emitSocket('skip_turn', { roomCode: currentRoomCode })
+-    clearSelection()
+-  }, [connected, currentRoomCode, myTurn, setError])
++    resetSel()
++  }
+ 
+   if (!gameState) return <GameSyncWaiting />
+ 
+@@ -138,45 +194,95 @@ export default function GamePage() {
+           ⏱ {timeLeft}s
+         </div>
+         {combo && (
+-          <div style={{ fontSize:12, color:C.green, fontWeight:600 }}>✓ {combo.label}</div>
++          <div style={{ fontSize:12, color: beatsTable ? C.green : C.muted, fontWeight:600 }}>{beatsTable ? '✓ ' : ''}{combo.label}</div>
++        )}
++        {combo && tableTop && !beatsTable && (
++          <div style={{ fontSize:12, color:C.yellow }}>Tidak bisa mengalahkan meja</div>
+         )}
+         {selected.length > 0 && !combo && (
+           <div style={{ fontSize:12, color:C.accent }}>Kombinasi tidak valid</div>
+         )}
+       </div>
+ 
+-      {/* Hand */}
+-      <div style={{ flexShrink:0, padding:'4px 0 6px', overflowX:'auto' }}>
+-        <div style={{ display:'flex', justifyContent:'center', paddingInline:12, minHeight:72 }}>
+-          {myHand.map((card, i) => (
+-            <CardTile
+-              key={card.id}
+-              card={card}
+-              size="lg"
+-              selected={selectedIds.includes(card.id)}
+-              onTap={myTurn ? () => toggleCard(card.id) : undefined}
+-              overlap={i > 0}
+-            />
+-          ))}
++      {/* Hand zone: [Combo Detector + CLEAR] [dek utama | grup] [AUTO SKIP PLAY HINT] */}
++      <div style={{ flexShrink:0, padding:'2px 8px 16px' }}>
++        {compact && <DetectorPanel available={available} activePick={activePick} onPick={(kind) => act({ type: 'detector', available, kind })} compact />}
++
++        <div style={{ display:'flex', alignItems:'stretch', gap:8 }}>
++          {!compact && (
++            <div style={{ width:152, flexShrink:0, display:'flex', flexDirection:'column', justifyContent:'space-between', gap:8 }}>
++              <DetectorPanel available={available} activePick={activePick} onPick={(kind) => act({ type: 'detector', available, kind })} />
++              <ClearButton onClick={resetSel} disabled={selIds.length === 0} />
++            </div>
++          )}
++
++          <div style={{ flex:1, minWidth:0, overflowX:'auto', display:'flex' }}>
++            <div ref={wrapRef} style={{ position:'relative', display:'flex', alignItems:'flex-end', gap:14, margin:'0 auto', padding:'52px 12px 4px' }}>
++              {/* Dek utama */}
++              <div style={{ display:'flex', minHeight:60 }}>
++                {deckIds.map((id, i) => (
++                  <CardTile
++                    key={id} card={cardById[id]} size="lg" overlap={i > 0}
++                    innerRef={setCardEl(id)}
++                    selected={selIds.includes(id)}
++                    onTap={() => act({ type: 'tapCard', id })}
++                  />
++                ))}
++              </div>
++
++              {/* Group Chain (kanan dek utama, kartu lebih kecil dan abu-abu) */}
++              {groups.length > 0 && (
++                <div style={{ display:'flex', alignItems:'flex-end', gap:8, paddingLeft:10, borderLeft:'1px dashed #35507a' }}>
++                  {groups.map((g, gi) => (
++                    <div key={g.join('.')} style={{
++                      display:'flex', padding:'3px 4px', borderRadius:8,
++                      border:`1px solid ${isGroupSelected(g, selIds) ? C.accent : '#4a5a78'}`,
++                      background:'rgba(255,255,255,0.06)',
++                    }}>
++                      {g.map((id, i) => (
++                        <CardTile
++                          key={id} card={cardById[id]} size="sm" grouped overlap={i > 0}
++                          innerRef={setCardEl(id)}
++                          selected={selIds.includes(id)}
++                          onTap={() => act({ type: 'tapGroup', index: gi })}
++                        />
++                      ))}
++                    </div>
++                  ))}
++                </div>
++              )}
++
++              {/* Tombol GROUP / UNGROUP di atas kartu terkait */}
++              {(() => {
++                const overlap = anchors.group && anchors.ungroup.some(u => Math.abs(u.x - anchors.group.x) < 84)
++                return (
++                  <>
++                    {anchors.group && (
++                      <FloatBtn x={anchors.group.x + (overlap ? -44 : 0)} y={anchors.group.y} onClick={() => act({ type: 'group' })} bg={C.accent}>GROUP</FloatBtn>
++                    )}
++                    {anchors.ungroup.map(u => (
++                      <FloatBtn key={u.index} x={u.x + (overlap ? 44 : 0)} y={u.y} onClick={() => act({ type: 'ungroup', index: u.index })} bg={C.deep}>UNGROUP</FloatBtn>
++                    ))}
++                  </>
++                )
++              })()}
++            </div>
++          </div>
++
++          {!compact && (
++            <Controls onSkip={handleSkip} onPlay={handlePlay}
++              skipDisabled={!connected || !myTurn} playDisabled={!canPlay} count={selIds.length} />
++          )}
+         </div>
+-      </div>
+ 
+-      {/* Action buttons */}
+-      <div style={{ display:'flex', gap:10, padding:'8px 16px 20px', flexShrink:0 }}>
+-        <button
+-          onClick={handleSkip}
+-          disabled={!connected || !myTurn}
+-          style={{ ...actionBtn, flex:1, background:C.deep, color: (connected && myTurn) ? C.text : C.muted, border:`1px solid ${C.border}` }}
+-        >
+-          Skip
+-        </button>
+-        <button
+-          onClick={handlePlay}
+-          disabled={!connected || !combo || !myTurn}
+-          style={{ ...actionBtn, flex:2, background: (connected && combo && myTurn) ? C.accent : '#333', color: (connected && combo && myTurn) ? '#fff' : C.muted }}
+-        >
+-          {selected.length > 0 ? `Main (${selected.length} kartu)` : 'Pilih kartu'}
+-        </button>
++        {compact && (
++          <div style={{ display:'flex', alignItems:'center', gap:6, marginTop:6 }}>
++            <ClearButton onClick={resetSel} disabled={selIds.length === 0} />
++            <div style={{ flex:1 }} />
++            <Controls row onSkip={handleSkip} onPlay={handlePlay}
++              skipDisabled={!connected || !myTurn} playDisabled={!canPlay} count={selIds.length} />
++          </div>
++        )}
+       </div>
+     </div>
+   )
+@@ -203,25 +309,30 @@ function OpponentBox({ opponent, isActive, setScores, userId }) {
+   )
+ }
+ 
+-function CardTile({ card, selected, onTap, size = 'lg', overlap }) {
++function CardTile({ card, selected, onTap, size = 'lg', overlap, grouped, innerRef }) {
+   const red = IS_RED[card.suit]
+-  const dim = size === 'lg' ? { w:42, h:60, fs:14, fss:12 } : { w:34, h:48, fs:12, fss:10 }
++  const dim = size === 'lg' ? { w:42, h:60, fs:14, fss:12, ov:16 }
++            : size === 'sm' ? { w:30, h:42, fs:11, fss:9,  ov:12 }
++            :                 { w:34, h:48, fs:12, fss:10, ov:16 }
++  // Kartu dalam grup: lebih kecil dan agak abu-abu; saat terpilih tampil menonjol seperti kartu dek utama.
++  const gray = grouped && !selected
+ 
+   return (
+     <div
++      ref={innerRef}
+       onClick={onTap}
+       style={{
+         width: dim.w, height: dim.h, flexShrink:0,
+-        background: selected ? '#1e3a5f' : '#fff',
+-        border: `1.5px solid ${selected ? C.accent : '#ccc'}`,
++        background: selected ? '#1e3a5f' : gray ? '#c9cdd6' : '#fff',
++        border: `1.5px solid ${selected ? C.accent : gray ? '#9097a3' : '#ccc'}`,
+         borderRadius: 6,
+         display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center',
+         gap:1,
+-        color: red ? '#c0392b' : '#1a1a2e',
++        color: gray ? (red ? '#9b5a55' : '#3d4350') : (red ? '#c0392b' : '#1a1a2e'),
+         cursor: onTap ? 'pointer' : 'default',
+         transform: selected ? 'translateY(-14px)' : 'translateY(0)',
+         transition: 'transform 0.12s, border-color 0.12s',
+-        marginLeft: overlap ? -16 : 0,
++        marginLeft: overlap ? -dim.ov : 0,
+         boxShadow: selected ? `0 4px 12px rgba(233,69,96,0.4)` : '0 1px 4px rgba(0,0,0,0.2)',
+         zIndex: selected ? 10 : 1,
+         position:'relative',
+@@ -233,15 +344,101 @@ function CardTile({ card, selected, onTap, size = 'lg', overlap }) {
+   )
+ }
+ 
++/** Combo Detector: jenis kombinasi yang bisa dibentuk dari tangan (dek utama + grup). */
++function DetectorPanel({ available, activePick, onPick, compact }) {
++  const types = COMBO_TYPES.filter(t => available[t.key]?.length)
++  if (!types.length) return null
++  return (
++    <div style={compact
++      ? { display:'flex', gap:6, overflowX:'auto', padding:'0 0 6px' }
++      : { display:'grid', gridTemplateColumns:'1fr 1fr', gap:4 }}>
++      {types.map(t => {
++        const on = activePick?.type === t.key
++        return (
++          <button key={t.key} onClick={() => onPick(t.key)} title={`Pilih ${t.label} (klik lagi: berikutnya)`}
++            style={{
++              flexShrink:0, padding:'5px 6px', fontSize:11, fontWeight:600, borderRadius:7, cursor:'pointer',
++              background: on ? C.accent : C.deep, color: on ? '#fff' : C.text,
++              border:`1px solid ${on ? C.accent : C.border}`, whiteSpace:'nowrap',
++            }}>
++            {t.label}{on ? ` ${activePick.index + 1}/${available[t.key].length}` : ''}
++          </button>
++        )
++      })}
++    </div>
++  )
++}
++
++function ClearButton({ onClick, disabled }) {
++  return (
++    <button onClick={onClick} disabled={disabled}
++      style={{ ...smallBtn, background:'transparent', color: disabled ? C.muted : C.text, border:`1px solid ${C.border}`, opacity: disabled ? 0.5 : 1 }}>
++      CLEAR
++    </button>
++  )
++}
++
++/** Kolom kanan: AUTO (placeholder), SKIP, PLAY, HINT (placeholder). */
++function Controls({ row, onSkip, onPlay, skipDisabled, playDisabled, count }) {
++  const placeholder = (label) => (
++    <button disabled title="Segera hadir" style={{ ...smallBtn, background:'#222', color:'#666', border:'1px solid #2a2a3a' }}>{label}</button>
++  )
++  return (
++    <div style={row
++      ? { display:'flex', gap:6, alignItems:'center' }
++      : { width:88, flexShrink:0, display:'flex', flexDirection:'column', justifyContent:'space-between', gap:6 }}>
++      {placeholder('AUTO')}
++      <button onClick={onSkip} disabled={skipDisabled}
++        style={{ ...smallBtn, background:C.deep, color: skipDisabled ? C.muted : C.text, border:`1px solid ${C.border}` }}>SKIP</button>
++      <button onClick={onPlay} disabled={playDisabled}
++        style={{ ...smallBtn, fontSize:13, padding: row ? '8px 14px' : '12px 0', background: playDisabled ? '#333' : C.accent, color: playDisabled ? C.muted : '#fff' }}>
++        PLAY{count > 0 ? ` (${count})` : ''}
++      </button>
++      {placeholder('HINT')}
++    </div>
++  )
++}
++
++// Tombol melayang di atas kartu (GROUP / UNGROUP). Kartu terpilih terangkat 14px, tombol setinggi 26px + jarak 4px.
++function FloatBtn({ x, y, onClick, bg, children }) {
++  return (
++    <button onClick={onClick}
++      style={{
++        position:'absolute', left:Math.max(x, 40), top:y - 44, transform:'translateX(-50%)', zIndex:30,
++        height:26, padding:'0 10px', fontSize:11, fontWeight:700, borderRadius:7, border:`1px solid ${C.border}`,
++        background:bg, color:'#fff', cursor:'pointer', whiteSpace:'nowrap', boxShadow:'0 2px 8px rgba(0,0,0,0.4)',
++      }}>{children}</button>
++  )
++}
++
+ /* ── Helpers ──────────────────────────────────────────────── */
+ 
+ function flex(j) { return { display:'flex', alignItems:'center', justifyContent:j } }
+ 
+-const actionBtn = {
+-  padding:'13px 0', borderRadius:10, fontSize:15, fontWeight:600,
++const smallBtn = {
++  padding:'8px 10px', borderRadius:8, fontSize:11, fontWeight:700,
+   border:'none', cursor:'pointer', transition:'background 0.15s, opacity 0.15s',
+ }
+ 
++// Posisi elemen relatif terhadap wadah (offsetLeft/Top mengabaikan transform, jadi tidak terganggu animasi angkat kartu).
++function offsetWithin(el, wrap) {
++  let left = 0, top = 0, n = el
++  while (n && n !== wrap) { left += n.offsetLeft; top += n.offsetTop; n = n.offsetParent }
++  return { left, top }
++}
++
++// Layar sempit (HP): Combo Detector pindah ke baris di atas dek, kontrol ke baris di bawah.
++function useCompact(breakpoint) {
++  const get = () => typeof window !== 'undefined' && window.innerWidth < breakpoint
++  const [compact, setCompact] = useState(get)
++  useEffect(() => {
++    const on = () => setCompact(get())
++    window.addEventListener('resize', on)
++    return () => window.removeEventListener('resize', on)
++  }, [breakpoint])   // eslint-disable-line react-hooks/exhaustive-deps
++  return compact
++}
++
+ function toastMsg(ev, myId) {
+   switch (ev.type) {
+     case 'rally_ended':       return '🧹 Rally selesai — meja bersih'
+diff --git a/frontend/src/store/gameStore.js b/frontend/src/store/gameStore.js
+index 41e5da5..6cb09d6 100644
+--- a/frontend/src/store/gameStore.js
++++ b/frontend/src/store/gameStore.js
+@@ -100,6 +100,7 @@ export const useGameStore = create((set, get) => ({
+     const cur = get().selectedIds
+     set({ selectedIds: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] })
+   },
++  setSelection: (ids) => set({ selectedIds: ids }),
+   clearSelection: () => set({ selectedIds: [] }),
+ 
+   // ── Events (toasts / animations) ────────────────────────────────
+diff --git a/frontend/src/utils/comboDetector.js b/frontend/src/utils/comboDetector.js
+index 331be89..8a49e08 100644
+--- a/frontend/src/utils/comboDetector.js
++++ b/frontend/src/utils/comboDetector.js
+@@ -113,3 +113,70 @@ export function displayOrder(combo) {
+   const written = LOW_STRAIGHT_DISPLAY.find(seq => ranks.size === 5 && seq.every(r => ranks.has(r)))
+   return written ? written.map(r => cards.find(c => c.rank === r)) : cards
+ }
++
++// ── Perbandingan kekuatan (cermin canBeat/compareCombo di backend/src/game/validator.js) ──
++// Dipakai hanya untuk umpan balik instan di UI (tombol PLAY, urutan Combo Detector);
++// server tetap memvalidasi segalanya. Diuji identik dengan server di backend/tests/combo.consistency.js.
++const PAKETAN_TIER = { straight: 1, flush: 2, fullhouse: 3, fourofakind: 4, straightflush: 5, royalflush: 6 }
++const LOW_STRAIGHT_TOP = { '3,4,5,A,2': '5', '3,4,5,6,2': '6' }
++
++// Detail kekuatan sebuah kombinasi hasil detectCombo().
++function strength(combo) {
++  const cards = [...combo.cards].sort(compareCards)
++  const ranks = cards.map(c => c.rank)
++  const counts = ranks.reduce((a, r) => { a[r] = (a[r] || 0) + 1; return a }, {})
++  const rankWith = (n) => Object.keys(counts).find(r => counts[r] === n)
++  const topRank = LOW_STRAIGHT_TOP[ranks.join(',')]
++  const highCard = topRank ? cards.find(c => c.rank === topRank) : cards[4]
++  switch (combo.type) {
++    case 'single': return { cards }
++    case 'pair':   return { rank: cards[0].rank, cards }
++    case 'tris':   return { rank: cards[0].rank, cards }
++    default:
++      return {
++        tier: PAKETAN_TIER[combo.subtype], subtype: combo.subtype, suit: cards[0].suit,
++        highCard, threeRank: rankWith(3), fourRank: rankWith(4), cards,
++      }
++  }
++}
++
++function compareSameSubtype(a, b) {
++  switch (a.subtype) {
++    case 'straight': case 'straightflush': case 'royalflush':
++      return compareCards(a.highCard, b.highCard)
++    case 'flush': {
++      const sv = SV[a.suit] - SV[b.suit]
++      return sv !== 0 ? sv : compareCards(a.highCard, b.highCard)
++    }
++    case 'fullhouse':   return RV[a.threeRank] - RV[b.threeRank]
++    case 'fourofakind': return RV[a.fourRank] - RV[b.fourRank]
++    default: return 0
++  }
++}
++
++// >0 jika a lebih kuat dari b, 0 sama kuat, <0 lebih lemah. Hanya bermakna untuk tipe yang sama.
++export function compareCombos(a, b) {
++  const x = strength(a), y = strength(b)
++  if (a.type === 'single') return compareCards(x.cards[0], y.cards[0])
++  if (a.type === 'pair') {
++    const rv = RV[x.rank] - RV[y.rank]
++    if (rv !== 0) return rv
++    return compareCards(x.cards[1], y.cards[1])   // kartu tertinggi pasangan
++  }
++  if (a.type === 'tris') return RV[x.rank] - RV[y.rank]
++  if (x.tier !== y.tier) return x.tier - y.tier
++  return compareSameSubtype(x, y)
++}
++
++// Apakah `play` boleh dimainkan di atas `table` (meja kosong = selalu boleh).
++export function canBeat(play, table) {
++  if (!play) return false
++  if (!table) return true
++  if (play.type !== table.type) return false
++  if (play.type === 'paketan') {
++    const x = strength(play), y = strength(table)
++    if (x.tier !== y.tier) return x.tier > y.tier
++    return compareSameSubtype(x, y) > 0
++  }
++  return compareCombos(play, table) > 0
++}
+diff --git a/frontend/src/utils/comboPicker.js b/frontend/src/utils/comboPicker.js
+new file mode 100644
+index 0000000..5b0443c
+--- /dev/null
++++ b/frontend/src/utils/comboPicker.js
+@@ -0,0 +1,74 @@
++// Combo Detector: daftar kombinasi yang bisa dibentuk dari seluruh tangan (dek utama + grup),
++// diurutkan dari terlemah ke terkuat. Memakai detectCombo/compareCombos yang sudah ada.
++import { detectCombo, compareCombos, sortHand } from './comboDetector'
++
++// Urutan tampil jenis kombinasi (dari yang paling lemah).
++export const COMBO_TYPES = [
++  { key: 'single',        label: 'Single' },
++  { key: 'pair',          label: 'Pair' },
++  { key: 'tris',          label: 'Tris' },
++  { key: 'straight',      label: 'Straight' },
++  { key: 'flush',         label: 'Flush' },
++  { key: 'fullhouse',     label: 'Full House' },
++  { key: 'fourofakind',   label: 'Four of a Kind' },
++  { key: 'straightflush', label: 'Straight Flush' },
++  { key: 'royalflush',    label: 'Royal Flush' },
++]
++
++const typeKeyOf = (combo) => combo.subtype || combo.type
++
++// Semua subset ukuran k (indeks naik) dari array.
++function* subsets(arr, k, start = 0, acc = []) {
++  if (acc.length === k) { yield acc.slice(); return }
++  for (let i = start; i <= arr.length - (k - acc.length); i++) {
++    acc.push(arr[i]); yield* subsets(arr, k, i + 1, acc); acc.pop()
++  }
++}
++
++/**
++ * @returns {Record<string, {ids: string[], combo: object}[]>} per jenis, urut terlemah → terkuat.
++ * Kandidat yang sama kuat (mis. Four of a Kind dengan kartu ke-5 berbeda) hanya diwakili satu:
++ * yang tersusun dari kartu terendah, supaya siklus klik tidak berisi pilihan yang setara.
++ */
++export function listAvailableCombos(hand) {
++  const cards = sortHand(hand || [])
++  const byType = {}
++  for (const size of [1, 2, 3, 5]) {
++    if (cards.length < size) continue
++    for (const sub of subsets(cards, size)) {
++      const combo = detectCombo(sub)
++      if (!combo) continue
++      ;(byType[typeKeyOf(combo)] ||= []).push({ ids: sub.map(c => c.id), combo })
++    }
++  }
++  for (const key of Object.keys(byType)) {
++    const sorted = byType[key].map((x, i) => ({ x, i }))
++      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || a.i - b.i)
++      .map(({ x }) => x)
++    byType[key] = sorted.filter((x, i) => i === 0 || compareCombos(x.combo, sorted[i - 1].combo) !== 0)
++  }
++  return byType
++}
++
++export const sameIds = (a, b) => a.length === b.length && a.every(id => b.includes(id))
++
++/**
++ * Klik pada jenis `type`. Klik berulang pada jenis yang sama (dan seleksi masih persis kandidat
++ * terakhir) maju ke kandidat berikutnya, lalu kembali ke yang pertama. Selain itu mulai dari yang terlemah.
++ * @returns {{ids: string[], index: number, count: number} | null}
++ */
++export function pickNext(available, type, last, selectedIds) {
++  const list = available?.[type]
++  if (!list?.length) return null
++  let index = 0
++  if (last && last.type === type && list[last.index] && sameIds(list[last.index].ids, selectedIds)) {
++    index = (last.index + 1) % list.length
++  }
++  return { ids: list[index].ids, index, count: list.length }
++}
++
++/** Pilihan Combo Detector yang masih berlaku (seleksi saat ini persis kandidat terakhir), atau null. */
++export function activePickOf(lastPick, available, selectedIds) {
++  const cand = lastPick && available?.[lastPick.type]?.[lastPick.index]
++  return cand && sameIds(cand.ids, selectedIds) ? lastPick : null
++}
+diff --git a/frontend/src/utils/groupChain.js b/frontend/src/utils/groupChain.js
+new file mode 100644
+index 0000000..29ed49d
+--- /dev/null
++++ b/frontend/src/utils/groupChain.js
+@@ -0,0 +1,61 @@
++// Group Chain: pengelompokan kartu di tangan (state murni; UI ada di GamePage.jsx).
++// groups = array grup, tiap grup array id kartu (urutan tampil = urutan tangan).
++
++// Buang grup yang menyentuh kartu yang sudah tidak ada di tangan (mis. sudah dimainkan):
++// grup itu dibubarkan seluruhnya sehingga sisa kartunya kembali ke dek utama.
++// Mengembalikan array yang SAMA bila tidak ada perubahan.
++export function pruneGroups(groups, handIds) {
++  const have = new Set(handIds)
++  const kept = groups.filter(g => g.length >= 2 && g.every(id => have.has(id)))
++  return kept.length === groups.length ? groups : kept
++}
++
++// Buat grup baru dari kartu terpilih (minimal 2). Grup lama yang kartunya ikut terpilih
++// dibubarkan; sisa kartunya kembali ke dek utama.
++export function groupSelected(groups, selectedIds, handOrderIds) {
++  const sel = new Set(selectedIds)
++  if (sel.size < 2) return groups
++  const rest = groups.filter(g => !g.some(id => sel.has(id)))
++  const ordered = handOrderIds.filter(id => sel.has(id))
++  return [...rest, ordered]
++}
++
++export function ungroupAt(groups, index) {
++  return groups.filter((_, i) => i !== index)
++}
++
++// Kartu dek utama = tangan tanpa kartu yang ada di grup.
++export function mainDeckIds(handOrderIds, groups) {
++  const grouped = new Set(groups.flat())
++  return handOrderIds.filter(id => !grouped.has(id))
++}
++
++export const isGroupSelected = (group, selectedIds) => group.every(id => selectedIds.includes(id))
++
++// ── Prioritas seleksi: aksi seleksi terbaru menggantikan seleksi dari Combo Detector ──
++// sel = { ids: string[], source: 'manual' | 'detector' | null }
++export const EMPTY_SELECTION = { ids: [], source: null }
++
++export function selectByDetector(ids) { return { ids: [...ids], source: 'detector' } }
++
++export function tapCard(sel, id) {
++  if (sel.source === 'detector') return { ids: [id], source: 'manual' }
++  return { ids: sel.ids.includes(id) ? sel.ids.filter(x => x !== id) : [...sel.ids, id], source: 'manual' }
++}
++
++export function tapGroup(sel, groupIds) {
++  if (sel.source === 'detector') return { ids: [...groupIds], source: 'manual' }
++  if (groupIds.every(id => sel.ids.includes(id))) {
++    return { ids: sel.ids.filter(id => !groupIds.includes(id)), source: 'manual' }
++  }
++  return { ids: [...new Set([...sel.ids, ...groupIds])], source: 'manual' }
++}
++
++// Posisi tombol di atas sekumpulan kartu: tengah-tengah rentang horizontal, di atas kartu tertinggi.
++// rects: [{ left, top, width }] relatif terhadap wadah.
++export function anchorAbove(rects) {
++  if (!rects.length) return null
++  const left = Math.min(...rects.map(r => r.left))
++  const right = Math.max(...rects.map(r => r.left + r.width))
++  return { x: (left + right) / 2, y: Math.min(...rects.map(r => r.top)) }
++}
+diff --git a/frontend/src/utils/handUi.js b/frontend/src/utils/handUi.js
+new file mode 100644
+index 0000000..245e046
+--- /dev/null
++++ b/frontend/src/utils/handUi.js
+@@ -0,0 +1,52 @@
++// Logika interaksi tangan di GamePage (seleksi, Combo Detector, Group Chain) sebagai fungsi murni
++// supaya bisa diuji tanpa browser. GamePage hanya menyambungkannya ke state React dan gameStore.
++//
++// ui     = { key, groups, source, lastPick }   (state lokal UI; direset per room+game karena id kartu dipakai ulang)
++// selIds = id kartu terpilih (disimpan di gameStore.selectedIds)
++import { pickNext, activePickOf } from './comboPicker'
++import {
++  pruneGroups, groupSelected, ungroupAt, selectByDetector, tapCard, tapGroup,
++} from './groupChain'
++
++export const INITIAL_UI = { key: null, groups: [], source: null, lastPick: null }
++
++/** Samakan ui dengan tangan saat ini: game/room baru → reset; kartu keluar dari tangan → grup terkait bubar. */
++export function syncUi(ui, key, handIds) {
++  if (ui.key !== key) return { ...INITIAL_UI, key }
++  const groups = pruneGroups(ui.groups, handIds)
++  return groups === ui.groups ? ui : { ...ui, groups }
++}
++
++/**
++ * @param action  {type:'detector', available, kind} | {type:'tapCard', id} | {type:'tapGroup', index}
++ *                | {type:'group'} | {type:'ungroup', index} | {type:'clear'}
++ * @returns {{ui, selIds}}
++ */
++export function reduceHandUi(ui, selIds, handIds, action) {
++  const sel = { ids: selIds, source: ui.source }
++  switch (action.type) {
++    case 'detector': {
++      const r = pickNext(action.available, action.kind, activePickOf(ui.lastPick, action.available, selIds), selIds)
++      if (!r) return { ui, selIds }
++      return { ui: { ...ui, source: 'detector', lastPick: { type: action.kind, index: r.index } }, selIds: selectByDetector(r.ids).ids }
++    }
++    case 'tapCard': {
++      const n = tapCard(sel, action.id)
++      return { ui: { ...ui, source: n.source }, selIds: n.ids }
++    }
++    case 'tapGroup': {
++      const n = tapGroup(sel, ui.groups[action.index])
++      return { ui: { ...ui, source: n.source }, selIds: n.ids }
++    }
++    case 'group': {
++      if (selIds.length < 2) return { ui, selIds }
++      return { ui: { ...ui, groups: groupSelected(ui.groups, selIds, handIds), source: null, lastPick: null }, selIds: [] }
++    }
++    case 'ungroup':
++      return { ui: { ...ui, groups: ungroupAt(ui.groups, action.index), source: null, lastPick: null }, selIds: [] }
++    case 'clear':   // CLEAR / setelah PLAY / SKIP: hanya seleksi yang dibersihkan, Group Chain tetap
++      return { ui: { ...ui, source: null, lastPick: null }, selIds: [] }
++    default:
++      return { ui, selIds }
++  }
++}
+diff --git a/frontend/tests/combo-ui/render.mjs b/frontend/tests/combo-ui/render.mjs
+new file mode 100644
+index 0000000..8fcc8e6
+--- /dev/null
++++ b/frontend/tests/combo-ui/render.mjs
+@@ -0,0 +1,119 @@
++// Smoke test render GamePage.jsx ASLI dengan React + react-dom/server (render statis, tanpa DOM/efek).
++// Membutuhkan paket react, react-dom, typescript yang bisa di-resolve; bila tidak ada, uji ini DILEWATI (SKIP).
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import os from 'node:os'
++import path from 'node:path'
++import { createRequire } from 'node:module'
++import { pathToFileURL, fileURLToPath } from 'node:url'
++import { execSync } from 'node:child_process'
++
++const here = path.dirname(fileURLToPath(import.meta.url))
++const SRC = path.join(here, '../../src')
++const roots = [...(process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean)]
++try { roots.push(execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()) } catch {}
++const req = createRequire(import.meta.url)
++const find = (name) => { try { return req.resolve(name, { paths: [path.join(here, '../..'), ...roots] }) } catch { return null } }
++const reactPath = find('react'), serverPath = find('react-dom/server'), tsPath = find('typescript')
++if (!reactPath || !serverPath || !tsPath) { console.log('  SKIP   render GamePage: react / react-dom / typescript tidak ditemukan di mesin ini'); process.exit(0) }
++const ts = req(tsPath), { renderToString } = req(serverPath), React = req(reactPath)
++
++// ── lingkungan browser palsu ──
++const ss = new Map(); const fakeStore = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
++globalThis.sessionStorage = fakeStore; globalThis.localStorage = fakeStore
++const setWidth = (w) => { globalThis.window = { innerWidth: w, addEventListener() {}, removeEventListener() {}, location: { pathname: '/game' } } }
++const origErr = console.error; console.error = (...a) => { if (!String(a[0]).includes('useLayoutEffect does nothing on the server')) origErr(...a) }
++
++// ── bangun modul uji: transpile JSX → ESM, arahkan impor ke stub ──
++const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'martil-render-'))
++fs.mkdirSync(path.join(OUT, 'pages')); fs.mkdirSync(path.join(OUT, 'utils')); fs.mkdirSync(path.join(OUT, 'store')); fs.mkdirSync(path.join(OUT, 'stubs'))
++fs.writeFileSync(path.join(OUT, 'stubs/zustand.mjs'), `
++export function create(init) {
++  let state; const set = (p) => { state = { ...state, ...(typeof p === 'function' ? p(state) : p) } }; const get = () => state
++  state = init(set, get)
++  const useStore = () => state; useStore.getState = get; useStore.setState = set; return useStore
++}`)
++fs.writeFileSync(path.join(OUT, 'stubs/router.mjs'), `export const useNavigate = () => () => {}`)
++fs.writeFileSync(path.join(OUT, 'stubs/socket.mjs'), `export const emitSocket = () => {}`)
++fs.writeFileSync(path.join(OUT, 'stubs/waiting.mjs'), `export default function GameSyncWaiting() { return 'WAITING' }`)
++const map = { react: pathToFileURL(reactPath).href, zustand: './stubs/zustand.mjs' }
++const build = (rel, dest, rewrite) => {
++  let code = ts.transpileModule(fs.readFileSync(path.join(SRC, rel), 'utf8'), { compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
++  code = code.replace(/from '([^']+)'/g, (m, spec) => `from '${rewrite(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
++  fs.writeFileSync(path.join(OUT, dest), code)
++}
++const fix = (prefix) => (spec) => ({
++  react: map.react, 'react-router-dom': `${prefix}stubs/router.mjs`, zustand: `${prefix}stubs/zustand.mjs`,
++  '../store/gameStore': '../store/gameStore.mjs', '../hooks/useSocket': `${prefix}stubs/socket.mjs`,
++  '../components/GameSyncWaiting': `${prefix}stubs/waiting.mjs`,
++}[spec] ?? (spec.startsWith('../utils/') ? spec + '.mjs' : spec.startsWith('./') ? spec + '.mjs' : spec))
++build('store/gameStore.js', 'store/gameStore.mjs', fix('../'))
++for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
++build('pages/GamePage.jsx', 'pages/GamePage.mjs', fix('../'))
++const { useGameStore: store } = await import(pathToFileURL(path.join(OUT, 'store/gameStore.mjs')).href)
++const GamePage = (await import(pathToFileURL(path.join(OUT, 'pages/GamePage.mjs')).href)).default
++
++// ── helper ──
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++const mk = (id) => ({ id, rank: id.slice(0, -1), suit: id.slice(-1) })
++const HAND = ['3D','3C','4H','5D','6C','9S','JS','2D']
++function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND } = {}) {
++  setWidth(width)
++  const me = 'me'
++  store.setState({
++    user: { id: me }, roomCode: 'ROOM', roomInfo: { code: 'ROOM', maxGames: 4, setScores: {} }, connected,
++    selectedIds: selected, events: [], currentTurn: myTurn ? me : 'p2',
++    gameState: { gameNumber: 1, myHand: hand.map(mk), opponents: [{ id: 'p2', cardCount: 13 }], currentTurn: myTurn ? me : 'p2', timeLeft: 30000, table },
++  })
++  const html = renderToString(React.createElement(GamePage)).replace(/<!-- -->/g, '')
++  const buttons = [...html.matchAll(/<button([^>]*)>([^<]*)<\/button>/g)].map(m => ({ label: m[2].trim(), disabled: /disabled=""/.test(m[1]) }))
++  const btn = (label) => buttons.find(b => b.label === label || b.label.startsWith(label + ' '))
++  return { html, buttons, btn, raised: (html.match(/translateY\(-14px\)/g) || []).length }
++}
++const tableOf = (ids, pid = 'p2') => { const cards = ids.map(mk); return [{ playerId: pid, combo: { type: ids.length === 2 ? 'pair' : 'single', cards } }] }
++
++t('layout lebar: Combo Detector, CLEAR, serta AUTO/SKIP/PLAY/HINT ada; AUTO & HINT placeholder nonaktif', () => {
++  const r = render()
++  for (const l of ['Single', 'Pair', 'CLEAR', 'AUTO', 'SKIP', 'PLAY', 'HINT']) assert.ok(r.btn(l), `tombol ${l} tidak ada`)
++  assert.equal(r.btn('AUTO').disabled, true); assert.equal(r.btn('HINT').disabled, true)
++  assert.equal(r.btn('Tris'), undefined)                                  // tidak ada tris di tangan → jenis tidak ditampilkan
++  assert.ok(r.html.indexOf('>Single<') < r.html.indexOf('>3<'))          // detector di kiri (lebih dulu di DOM) dari dek
++  assert.ok(r.html.indexOf('>PLAY') > r.html.indexOf('>3<'))             // kontrol di kanan dek
++})
++t('PLAY aktif hanya bila seleksi legal: pair sah di meja kosong → aktif; terpilih 2 kartu non-pair → nonaktif', () => {
++  assert.equal(render({ selected: ['3D', '3C'] }).btn('PLAY').disabled, false)
++  assert.equal(render({ selected: ['3D', '4H'] }).btn('PLAY').disabled, true)
++  assert.equal(render({ selected: [] }).btn('PLAY').disabled, true)
++})
++t('PLAY nonaktif bila tidak bisa mengalahkan meja, aktif bila bisa; ada pesan penjelas', () => {
++  const lose = render({ selected: ['3D', '3C'], table: tableOf(['4D', '4C']) })
++  assert.equal(lose.btn('PLAY').disabled, true); assert.ok(lose.html.includes('Tidak bisa mengalahkan meja'))
++  const win = render({ selected: ['9S', 'JS'], table: tableOf(['4D', '4C']) })      // bukan pair → tetap tidak sah
++  assert.equal(win.btn('PLAY').disabled, true)
++  const win2 = render({ selected: ['3D', '3C'], table: tableOf(['3D', '3S'].map(String)) })   // pair 3 (high 3S) vs pair 3 (high 3C): kalah
++  assert.equal(win2.btn('PLAY').disabled, true)
++  const ok = render({ selected: ['5D'], table: [{ playerId: 'p2', combo: { type: 'single', cards: [mk('4H')] } }] })
++  assert.equal(ok.btn('PLAY').disabled, false)
++})
++t('bukan giliran: PLAY & SKIP nonaktif, tetapi Combo Detector dan seleksi tetap bisa dipakai', () => {
++  const r = render({ myTurn: false, selected: ['3D', '3C'] })
++  assert.equal(r.btn('PLAY').disabled, true); assert.equal(r.btn('SKIP').disabled, true)
++  assert.equal(r.btn('Single').disabled, false); assert.equal(r.btn('Pair').disabled, false)
++  assert.equal(r.btn('CLEAR').disabled, false); assert.equal(r.raised, 2)           // kartu terpilih tetap menonjol
++})
++t('CLEAR nonaktif saat tidak ada seleksi; kartu terpilih terangkat sebanyak seleksi', () => {
++  assert.equal(render().btn('CLEAR').disabled, true)
++  const r = render({ selected: ['9S', 'JS', '2D'] }); assert.equal(r.raised, 3); assert.equal(r.btn('CLEAR').disabled, false)
++})
++t('layar sempit: Combo Detector pindah ke atas dek, CLEAR di kiri bawah, kontrol tetap lengkap', () => {
++  const r = render({ width: 400 })
++  for (const l of ['Single', 'Pair', 'CLEAR', 'AUTO', 'SKIP', 'PLAY', 'HINT']) assert.ok(r.btn(l), `tombol ${l} tidak ada`)
++  assert.ok(r.html.indexOf('>Single<') < r.html.indexOf('>3<'))
++  assert.ok(r.html.indexOf('>CLEAR<') > r.html.indexOf('>2<'))                       // CLEAR di bawah dek
++  assert.ok(r.html.indexOf('>CLEAR<') < r.html.indexOf('>SKIP<'))                    // kiri dari kontrol
++})
++t('tidak terhubung: PLAY & SKIP nonaktif', () => {
++  const r = render({ connected: false, selected: ['3D', '3C'] }); assert.equal(r.btn('PLAY').disabled, true); assert.equal(r.btn('SKIP').disabled, true)
++})
++console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/combo-ui/run.mjs b/frontend/tests/combo-ui/run.mjs
+new file mode 100644
+index 0000000..f892e02
+--- /dev/null
++++ b/frontend/tests/combo-ui/run.mjs
+@@ -0,0 +1,257 @@
++import assert from 'node:assert/strict'
++import { createRequire } from 'node:module'
++import { detectCombo, compareCombos, canBeat, sortHand } from './utils/comboDetector.mjs'
++import { listAvailableCombos, pickNext, COMBO_TYPES } from './utils/comboPicker.mjs'
++import * as G from './utils/groupChain.mjs'
++import { INITIAL_UI, syncUi, reduceHandUi } from './utils/handUi.mjs'
++
++const require = createRequire(import.meta.url)
++const server = require('./server/game/validator.js')
++
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++
++const RANKS = ['3','4','5','6','7','8','9','10','J','Q','K','A','2'], SUITS = ['D','C','H','S']
++const deck = RANKS.flatMap(r => SUITS.map(s => ({ rank: r, suit: s, id: r + s })))
++const cards = (...ids) => ids.map(id => deck.find(c => c.id === id))
++let seed = 12345
++const rnd = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32
++const randomHand = (n = 13) => { const d = [...deck]; for (let i = d.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [d[i], d[j]] = [d[j], d[i]] } return d.slice(0, n) }
++const keyOf = (c) => c.subtype || c.type
++
++// ── Combo Detector: daftar kandidat ─────────────────────────────────────────
++const handA = cards('3D','3C','3S','4H','5D','5H','6C','7S','9S','10S','JS','KS','2D')
++
++t('kandidat tiap jenis sah menurut detectCombo, diurutkan terlemah → terkuat, tanpa kandidat setara', () => {
++  const av = listAvailableCombos(handA)
++  for (const [type, list] of Object.entries(av)) {
++    for (const { ids, combo } of list) assert.equal(keyOf(detectCombo(cards(...ids))), type)
++    for (let i = 1; i < list.length; i++) assert.ok(compareCombos(list[i].combo, list[i - 1].combo) > 0, `${type} #${i} harus lebih kuat`)
++  }
++  assert.deepEqual(av.single.map(x => x.ids[0]), sortHand(handA).map(c => c.id))   // single: 3D … 2D
++})
++t('properti (300 tangan acak): jenis & urutan kandidat sama dengan brute force memakai validator SERVER', () => {
++  for (let n = 0; n < 300; n++) {
++    const hand = randomHand(5 + Math.floor(rnd() * 9))
++    const av = listAvailableCombos(hand)
++    // brute force dengan server
++    const sorted = sortHand(hand), expectTypes = new Map()
++    const rec = (start, acc, size) => {
++      if (acc.length === size) { const c = server.detectCombo(acc.slice()); if (c) { const k = c.subtype || c.type; (expectTypes.get(k) || expectTypes.set(k, []).get(k)).push(c) } return }
++      for (let i = start; i < sorted.length; i++) { acc.push(sorted[i]); rec(i + 1, acc, size); acc.pop() }
++    }
++    for (const size of [1, 2, 3, 5]) if (sorted.length >= size) rec(0, [], size)
++    assert.deepEqual(Object.keys(av).sort(), [...expectTypes.keys()].sort(), `jenis tersedia tidak sama pada ${hand.map(c => c.id)}`)
++    for (const [k, list] of Object.entries(av)) {
++      for (let i = 1; i < list.length; i++) {
++        const lo = server.detectCombo(cards(...list[i - 1].ids)), hi = server.detectCombo(cards(...list[i].ids))
++        assert.ok(server.canBeat(hi, lo) && !server.canBeat(lo, hi), `${k}: urutan salah menurut server`)
++      }
++      // jumlah kandidat = jumlah tingkat kekuatan berbeda menurut server
++      const classes = []
++      for (const c of expectTypes.get(k)) if (!classes.some(x => !server.canBeat(c, x) && !server.canBeat(x, c))) classes.push(c)
++      assert.equal(list.length, classes.length, `${k}: jumlah kandidat berbeda`)
++    }
++  }
++})
++t('tangan tanpa kombinasi lebih tinggi hanya menampilkan jenis yang memang ada', () => {
++  const av = listAvailableCombos(cards('3D','5C','7H','9S','JD'))
++  assert.deepEqual(Object.keys(av), ['single'])
++  assert.equal(listAvailableCombos([]).single, undefined)
++})
++t('jenis yang tampil di panel mengikuti urutan lemah → kuat', () => {
++  assert.deepEqual(COMBO_TYPES.map(x => x.key), ['single','pair','tris','straight','flush','fullhouse','fourofakind','straightflush','royalflush'])
++})
++t('Four of a Kind: kandidat setara (kartu ke-5 berbeda) hanya diwakili satu, yang terendah', () => {
++  const av = listAvailableCombos(cards('4D','4C','4H','4S','2D','KC','AH'))
++  assert.equal(av.fourofakind.length, 1)
++  assert.deepEqual(av.fourofakind[0].ids.sort(), ['4C','4D','4H','4S','KC'].sort())
++})
++
++// ── Combo Detector: siklus klik ─────────────────────────────────────────────
++t('klik berulang pada jenis yang sama berganti terlemah → terkuat lalu kembali ke pertama', () => {
++  const av = listAvailableCombos(handA), n = av.pair.length
++  assert.ok(n >= 3)
++  let last = null, sel = [], seen = []
++  for (let i = 0; i < n + 2; i++) {
++    const r = pickNext(av, 'pair', last, sel); seen.push(r.index); last = { type: 'pair', index: r.index }; sel = r.ids
++  }
++  assert.deepEqual(seen, [...Array(n).keys(), 0, 1])
++})
++t('ganti jenis atau ubah seleksi manual → mulai lagi dari yang terlemah', () => {
++  const av = listAvailableCombos(handA)
++  const a = pickNext(av, 'pair', null, []); const b = pickNext(av, 'pair', { type: 'pair', index: a.index }, a.ids)
++  assert.equal(b.index, 1)
++  assert.equal(pickNext(av, 'tris', { type: 'pair', index: 1 }, b.ids).index, 0)               // jenis lain
++  assert.equal(pickNext(av, 'pair', { type: 'pair', index: 1 }, [...b.ids, '9S']).index, 0)    // seleksi diubah manual
++  assert.equal(pickNext(av, 'royalflush', null, []), null)                                      // jenis tidak tersedia
++})
++
++// ── Group Chain ──────────────────────────────────────────────────────────────
++const hand = ['3D','3C','4H','5D','6C','7S','9S','JS','KS','2D']
++t('groupSelected: minimal 2 kartu, urutan mengikuti tangan, jumlah grup tidak dibatasi', () => {
++  assert.deepEqual(G.groupSelected([], ['9S'], hand), [])
++  let gs = G.groupSelected([], ['9S', '3D'], hand); assert.deepEqual(gs, [['3D', '9S']])
++  gs = G.groupSelected(gs, ['4H', '5D'], hand); gs = G.groupSelected(gs, ['6C', '7S'], hand); gs = G.groupSelected(gs, ['JS', 'KS'], hand)
++  assert.equal(gs.length, 4)
++  assert.deepEqual(G.mainDeckIds(hand, gs), ['3C', '2D'])
++})
++t('mengelompokkan kartu yang berasal dari grup lama membubarkan grup itu; sisanya kembali ke dek utama', () => {
++  const gs = [['3D', '3C', '4H'], ['5D', '6C']]
++  const next = G.groupSelected(gs, ['3C', '9S'], hand)
++  assert.deepEqual(next, [['5D', '6C'], ['3C', '9S']])
++  assert.deepEqual(G.mainDeckIds(hand, next), ['3D', '4H', '7S', 'JS', 'KS', '2D'])
++})
++t('ungroup mengembalikan seluruh kartu grup ke dek utama; grup lain utuh', () => {
++  const gs = [['3D', '3C'], ['5D', '6C']]; const next = G.ungroupAt(gs, 0)
++  assert.deepEqual(next, [['5D', '6C']]); assert.ok(G.mainDeckIds(hand, next).includes('3D'))
++})
++t('pruneGroups: kartu dimainkan → seluruh grup terkait bubar; grup lain utuh; referensi sama bila tak berubah', () => {
++  const gs = [['3D', '3C', '4H'], ['5D', '6C'], ['9S', 'JS']]
++  assert.equal(G.pruneGroups(gs, hand), gs)
++  const afterPlay = hand.filter(id => !['3D', '9S', '2D'].includes(id))   // main 3D (grup 1), 9S (grup 3), 2D (bebas)
++  const next = G.pruneGroups(gs, afterPlay)
++  assert.deepEqual(next, [['5D', '6C']])
++  assert.deepEqual(G.mainDeckIds(afterPlay, next), ['3C', '4H', '7S', 'JS', 'KS'])   // sisa kartu grup kembali ke dek
++})
++t('pruneGroups: grup tersisa < 2 kartu dibubarkan', () => { assert.deepEqual(G.pruneGroups([['3D']], ['3D']), []) })
++t('Flexible grouping: Combo Detector mengambil kartu dari grup dan dek; selisih grup tetap utuh sampai dimainkan', () => {
++  const hand2 = ['3D','3C','3S','5D','5H','6C','9S','JS']
++  const gs = [['3D','3C'], ['5D','5H']]
++  const av = listAvailableCombos(hand2.map(id => deck.find(c => c.id === id)))
++  const tris = av.tris[0].ids.sort()
++  assert.deepEqual(tris, ['3C','3D','3S'])                      // 2 kartu dari grup + 1 dari dek
++  assert.deepEqual(G.pruneGroups(gs, hand2), gs)                // hanya memilih: grup tidak berubah
++  const played = hand2.filter(id => !tris.includes(id))
++  assert.deepEqual(G.mainDeckIds(played, G.pruneGroups(gs, played)), ['6C','9S','JS'])
++  assert.deepEqual(G.pruneGroups(gs, played), [['5D','5H']])    // grup 3D-3C bubar, 5D-5H tetap
++})
++t('pilih grup: seluruh kartunya terpilih; pilih lagi → terlepas', () => {
++  let sel = G.EMPTY_SELECTION
++  sel = G.tapGroup(sel, ['3D','3C']); assert.deepEqual(sel.ids, ['3D','3C'])
++  sel = G.tapGroup(sel, ['3D','3C']); assert.deepEqual(sel.ids, [])
++  assert.equal(G.isGroupSelected(['3D','3C'], ['3C','3D','9S']), true)
++  assert.equal(G.isGroupSelected(['3D','3C'], ['3C']), false)
++})
++
++// ── Prioritas seleksi ────────────────────────────────────────────────────────
++t('Combo Detector menggantikan seleksi sebelumnya (manual maupun detektor)', () => {
++  let sel = G.tapCard(G.tapCard(G.EMPTY_SELECTION, '3D'), '9S')
++  assert.deepEqual(sel.ids, ['3D', '9S'])
++  sel = G.selectByDetector(['5D', '5H']); assert.deepEqual(sel.ids, ['5D', '5H']); assert.equal(sel.source, 'detector')
++  sel = G.selectByDetector(['6C']); assert.deepEqual(sel.ids, ['6C'])
++})
++t('seleksi manual setelah Combo Detector menggantikan seleksi detektor, lalu menambah seperti biasa', () => {
++  let sel = G.selectByDetector(['5D', '5H'])
++  sel = G.tapCard(sel, '9S'); assert.deepEqual(sel, { ids: ['9S'], source: 'manual' })
++  sel = G.tapCard(sel, 'JS'); assert.deepEqual(sel.ids, ['9S', 'JS'])
++  sel = G.tapCard(sel, '9S'); assert.deepEqual(sel.ids, ['JS'])
++  sel = G.selectByDetector(['5D', '5H']); sel = G.tapGroup(sel, ['3D', '3C']); assert.deepEqual(sel.ids, ['3D', '3C'])
++})
++// ── Posisi tombol ────────────────────────────────────────────────────────────
++t('anchorAbove: tengah-tengah rentang kartu terpilih, di atas kartu tertinggi', () => {
++  assert.deepEqual(G.anchorAbove([{ left: 10, top: 52, width: 42 }, { left: 36, top: 52, width: 42 }, { left: 100, top: 70, width: 30 }]), { x: 70, y: 52 })
++  assert.deepEqual(G.anchorAbove([{ left: 0, top: 8, width: 40 }]), { x: 20, y: 8 })
++  assert.equal(G.anchorAbove([]), null)
++})
++
++// ── Skenario interaksi lengkap lewat reducer yang dipakai GamePage ──────────────
++const H = ['3D','3C','3S','4H','5D','5H','6C','7S','9S','JS','KS','2D']
++const handCards = cards(...H)
++const av = listAvailableCombos(handCards)
++const start = () => ({ ui: syncUi(INITIAL_UI, 'ROOM:1', H), sel: [] })
++const step = (st, action, hand = H) => { const r = reduceHandUi(st.ui, st.sel, hand, action); return { ui: r.ui, sel: r.selIds } }
++
++t('skenario: pilih 2 kartu → GROUP → kartu pindah ke grup, seleksi kosong', () => {
++  let st = start()
++  st = step(st, { type: 'tapCard', id: '9S' }); st = step(st, { type: 'tapCard', id: 'JS' })
++  assert.deepEqual(st.sel, ['9S', 'JS'])
++  st = step(st, { type: 'group' })
++  assert.deepEqual(st.ui.groups, [['9S', 'JS']]); assert.deepEqual(st.sel, [])
++  assert.ok(!G.mainDeckIds(H, st.ui.groups).includes('9S'))
++})
++t('skenario: GROUP butuh minimal 2 kartu', () => {
++  let st = step(start(), { type: 'tapCard', id: '9S' }); st = step(st, { type: 'group' })
++  assert.deepEqual(st.ui.groups, []); assert.deepEqual(st.sel, ['9S'])
++})
++t('skenario: klik grup memilih semua kartunya; UNGROUP mengembalikan semuanya ke dek utama', () => {
++  let st = start()
++  st = step(st, { type: 'tapCard', id: '5D' }); st = step(st, { type: 'tapCard', id: '5H' }); st = step(st, { type: 'group' })
++  st = step(st, { type: 'tapGroup', index: 0 }); assert.deepEqual(st.sel, ['5D', '5H'])
++  st = step(st, { type: 'ungroup', index: 0 })
++  assert.deepEqual(st.ui.groups, []); assert.deepEqual(st.sel, [])
++  assert.deepEqual(G.mainDeckIds(H, st.ui.groups), H)
++})
++t('skenario: banyak grup selama kartu cukup (4 grup dari 8 kartu)', () => {
++  let st = start()
++  for (const pair of [['3D','3C'], ['4H','5D'], ['6C','7S'], ['9S','JS']]) {
++    for (const id of pair) st = step(st, { type: 'tapCard', id })
++    st = step(st, { type: 'group' })
++  }
++  assert.equal(st.ui.groups.length, 4); assert.deepEqual(G.mainDeckIds(H, st.ui.groups), ['3S', '5H', 'KS', '2D'])
++})
++t('skenario: Combo Detector mengambil kartu dari grup + dek; dimainkan → kartu keluar, sisa grup kembali ke dek', () => {
++  let st = start()
++  for (const id of ['3D', '3C']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })      // grup [3D,3C]
++  for (const id of ['5D', '5H']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })      // grup [5D,5H]
++  st = step(st, { type: 'detector', available: av, kind: 'tris' })
++  assert.deepEqual([...st.sel].sort(), ['3C', '3D', '3S'])                       // 2 dari grup + 1 dari dek
++  assert.deepEqual(st.ui.groups, [['3D', '3C'], ['5D', '5H']])                   // memilih tidak mengubah grup
++  st = step(st, { type: 'clear' })                                               // PLAY → resetSel
++  const afterPlay = H.filter(id => !['3C', '3D', '3S'].includes(id))
++  const synced = syncUi(st.ui, 'ROOM:1', afterPlay)                              // tangan baru dari server
++  assert.deepEqual(synced.groups, [['5D', '5H']])                                // grup terkait bubar, grup lain utuh
++  assert.ok(G.mainDeckIds(afterPlay, synced.groups).includes('4H'))
++})
++t('skenario: sisa kartu grup yang kartunya sebagian dimainkan kembali ke dek utama', () => {
++  let st = start()
++  for (const id of ['6C', '7S', '9S']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })
++  const afterPlay = H.filter(id => id !== '7S')
++  const synced = syncUi(st.ui, 'ROOM:1', afterPlay)
++  assert.deepEqual(synced.groups, [])
++  assert.ok(['6C', '9S'].every(id => G.mainDeckIds(afterPlay, synced.groups).includes(id)))
++})
++t('skenario: CLEAR membersihkan seleksi tanpa menghapus Group Chain', () => {
++  let st = start()
++  for (const id of ['9S', 'JS']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })
++  st = step(st, { type: 'tapCard', id: '3D' }); st = step(st, { type: 'tapGroup', index: 0 })
++  st = step(st, { type: 'clear' })
++  assert.deepEqual(st.sel, []); assert.deepEqual(st.ui.groups, [['9S', 'JS']])
++})
++t('skenario: Combo Detector berulang lewat reducer: ganti pilihan, wrap, lalu seleksi manual menggantikan', () => {
++  let st = start(); const n = av.pair.length; const seen = []
++  for (let i = 0; i < n + 1; i++) { st = step(st, { type: 'detector', available: av, kind: 'pair' }); seen.push([...st.sel].sort().join('+')) }
++  assert.equal(new Set(seen.slice(0, n)).size, n); assert.equal(seen[n], seen[0])        // semua berbeda, lalu kembali ke pertama
++  st = step(st, { type: 'tapCard', id: '2D' }); assert.deepEqual(st.sel, ['2D'])         // manual menggantikan seleksi detektor
++  st = step(st, { type: 'detector', available: av, kind: 'tris' }); assert.equal(st.sel.length, 3)   // detektor menggantikan manual
++  st = step(st, { type: 'tapCard', id: '9S' }); st = step(st, { type: 'tapCard', id: 'JS' })
++  st = step(st, { type: 'detector', available: av, kind: 'pair' }); assert.equal(st.ui.lastPick.index, 0)   // seleksi diubah → mulai dari awal
++})
++t('skenario: Combo Detector tetap bekerja di luar giliran (tidak bergantung giliran)', () => {
++  // reducer tidak punya konsep giliran; PLAY/SKIP-lah yang dibatasi (diuji lewat legalitas + render)
++  const st = step(start(), { type: 'detector', available: av, kind: 'single' })
++  assert.deepEqual(st.sel, ['3D'])
++})
++t('game/room baru: grup dan seleksi direset (id kartu dipakai ulang antar game)', () => {
++  let st = start()
++  for (const id of ['9S', 'JS']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })
++  assert.equal(syncUi(st.ui, 'ROOM:1', H), st.ui)                 // game sama, tangan sama: tidak berubah
++  const next = syncUi(st.ui, 'ROOM:2', H)                          // game berikutnya, kartu 9S/JS kebetulan sama
++  assert.deepEqual(next.groups, []); assert.equal(next.key, 'ROOM:2')
++})
++
++// ── PLAY: legalitas di klien = aturan engine ─────────────────────────────────
++const legal = (sel, table) => { const c = detectCombo(cards(...sel)); return !!c && (!table || canBeat(c, detectCombo(cards(...table)))) }
++t('legalitas PLAY: meja kosong = kombinasi sah; meja terisi harus tipe sama dan lebih kuat', () => {
++  assert.equal(legal(['3D','4C']), false)                       // bukan pair
++  assert.equal(legal(['3D','3C']), true)                        // pair, meja kosong
++  assert.equal(legal(['4D','4C'], ['3D','3C']), true)
++  assert.equal(legal(['3D','3C'], ['4D','4C']), false)
++  assert.equal(legal(['4D','4C','4H'], ['3D','3C']), false)     // tipe beda
++  assert.equal(legal(['3S','5S','8S','JS','KS'], ['3S','4H','5D','6C','7S']), true)    // flush > straight
++  assert.equal(legal(['3S','4H','5D','6C','7S'], ['3S','5S','8S','JS','KS']), false)
++  assert.equal(legal(['AS','2H','3D','4C','5S'], ['2S','3H','4D','5C','6S']), false)   // A-2-3-4-5 < 2-3-4-5-6
++  assert.equal(legal(['4D','4C'], ['4D','4C']), false)          // sama kuat tidak mengalahkan
++})
++
++console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/combo-ui/run.sh b/frontend/tests/combo-ui/run.sh
+new file mode 100644
+index 0000000..443a75d
+--- /dev/null
++++ b/frontend/tests/combo-ui/run.sh
+@@ -0,0 +1,16 @@
++#!/usr/bin/env bash
++# Menguji logika Combo Detector + Group Chain (comboDetector.js, comboPicker.js, groupChain.js ASLI).
++# Tidak butuh browser maupun node_modules.   bash tests/combo-ui/run.sh      (dari folder frontend)
++set -euo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
++mkdir -p "$OUT/utils"
++for f in comboDetector comboPicker groupChain handUi; do
++  sed -e "s#from './comboDetector'#from './comboDetector.mjs'#" -e "s#from './comboPicker'#from './comboPicker.mjs'#" -e "s#from './groupChain'#from './groupChain.mjs'#" "$SRC/utils/$f.js" > "$OUT/utils/$f.mjs"
++done
++cp "$HERE/run.mjs" "$OUT/run.mjs"
++# Server asli dipakai sebagai pembanding independen.
++ln -s "$(cd "$HERE/../../../backend/src" && pwd)" "$OUT/server"
++node "$OUT/run.mjs"
++# Smoke test render GamePage (otomatis dilewati bila react/react-dom/typescript tidak tersedia).
++cp "$HERE/render.mjs" "$OUT/render.mjs"
++NODE_PATH="${NODE_PATH:-}" node "$HERE/render.mjs"

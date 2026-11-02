@@ -100,6 +100,7 @@ export const useGameStore = create((set, get) => ({
     const cur = get().selectedIds
     set({ selectedIds: cur.includes(id) ? cur.filter(x => x !== id) : [...cur, id] })
   },
+  setSelection: (ids) => set({ selectedIds: ids }),
   clearSelection: () => set({ selectedIds: [] }),
 
   // ── Events (toasts / animations) ────────────────────────────────
