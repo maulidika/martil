@@ -5,7 +5,7 @@
 // selIds = id kartu terpilih (disimpan di gameStore.selectedIds)
 import { pickNext, activePickOf } from './comboPicker'
 import {
-  pruneGroups, groupSelected, ungroupAt, selectByDetector, tapCard, tapGroup,
+  pruneGroups, groupSelected, ungroupAt, selectByDetector, tapCard, tapGroup, canGroupSelection,
 } from './groupChain'
 
 export const INITIAL_UI = { key: null, groups: [], source: null, lastPick: null }
@@ -31,7 +31,7 @@ export function reduceHandUi(ui, selIds, handIds, action) {
       return { ui: { ...ui, source: 'detector', lastPick: { type: action.kind, index: r.index } }, selIds: selectByDetector(r.ids).ids }
     }
     case 'tapCard': {
-      const n = tapCard(sel, action.id)
+      const n = tapCard(sel, action.id, ui.groups.flat())
       return { ui: { ...ui, source: n.source }, selIds: n.ids }
     }
     case 'tapGroup': {
@@ -39,7 +39,7 @@ export function reduceHandUi(ui, selIds, handIds, action) {
       return { ui: { ...ui, source: n.source }, selIds: n.ids }
     }
     case 'group': {
-      if (selIds.length < 2) return { ui, selIds }
+      if (!canGroupSelection(selIds, ui.groups)) return { ui, selIds }
       return { ui: { ...ui, groups: groupSelected(ui.groups, selIds, handIds), source: null, lastPick: null }, selIds: [] }
     }
     case 'ungroup':

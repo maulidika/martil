@@ -1,6 +1,6 @@
 // Combo Detector: daftar kombinasi yang bisa dibentuk dari seluruh tangan (dek utama + grup),
 // diurutkan dari terlemah ke terkuat. Memakai detectCombo/compareCombos yang sudah ada.
-import { detectCombo, compareCombos, sortHand } from './comboDetector'
+import { detectCombo, compareCombos, compareCards, sortHand } from './comboDetector'
 
 // Urutan tampil jenis kombinasi (dari yang paling lemah).
 export const COMBO_TYPES = [
@@ -41,9 +41,26 @@ export function listAvailableCombos(hand) {
       ;(byType[typeKeyOf(combo)] ||= []).push({ ids: sub.map(c => c.id), combo })
     }
   }
+  // Full House: pasangan (Pair) dibedakan antara yang independen (rank berjumlah tepat 2 di tangan)
+  // dan yang hasil pemecahan Three/Four of a Kind (rank berjumlah ≥3).
+  const rankCount = cards.reduce((m, c) => (m[c.rank] = (m[c.rank] || 0) + 1, m), {})
+  const pairInfo = (combo) => {
+    const counts = combo.cards.reduce((m, c) => (m[c.rank] = (m[c.rank] || 0) + 1, m), {})
+    const rank = Object.keys(counts).find(r => counts[r] === 2)
+    return { rank, card: combo.cards.find(c => c.rank === rank) }
+  }
+  // Urutan prioritas antar Full House yang setara kuat (tris sama): Pair independen dulu, lalu Pair terlemah.
+  // Dengan begitu bila ada Pair independen, semua alternatif Full House memakai Pair yang SAMA dan hanya Tris
+  // yang berganti; bila tidak ada, Pair boleh berasal dari pemecahan tris lain (555+66, 666+55).
+  const pairPref = (a, b) => {
+    const pa = pairInfo(a.combo), pb = pairInfo(b.combo)
+    const ia = rankCount[pa.rank] === 2 ? 0 : 1, ib = rankCount[pb.rank] === 2 ? 0 : 1
+    return ia - ib || compareCards(pa.card, pb.card)
+  }
   for (const key of Object.keys(byType)) {
+    const tie = key === 'fullhouse' ? pairPref : () => 0
     const sorted = byType[key].map((x, i) => ({ x, i }))
-      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || a.i - b.i)
+      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || tie(a.x, b.x) || a.i - b.i)
       .map(({ x }) => x)
     byType[key] = sorted.filter((x, i) => i === 0 || compareCombos(x.combo, sorted[i - 1].combo) !== 0)
   }

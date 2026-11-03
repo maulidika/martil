@@ -38,17 +38,25 @@ export const EMPTY_SELECTION = { ids: [], source: null }
 
 export function selectByDetector(ids) { return { ids: [...ids], source: 'detector' } }
 
-export function tapCard(sel, id) {
-  if (sel.source === 'detector') return { ids: [id], source: 'manual' }
+// Seleksi dek utama dan Group Chain bersifat eksklusif: mengetuk sumber lain membersihkan seleksi sebelumnya
+// (tidak pernah memunculkan GROUP atau menggabungkan kartu). Hanya Combo Detector yang boleh mencampur.
+export function tapCard(sel, id, groupedIds = []) {
+  const fromGroup = sel.ids.some(x => groupedIds.includes(x))
+  if (sel.source === 'detector' || fromGroup) return { ids: [id], source: 'manual' }
   return { ids: sel.ids.includes(id) ? sel.ids.filter(x => x !== id) : [...sel.ids, id], source: 'manual' }
 }
 
 export function tapGroup(sel, groupIds) {
-  if (sel.source === 'detector') return { ids: [...groupIds], source: 'manual' }
-  if (groupIds.every(id => sel.ids.includes(id))) {
-    return { ids: sel.ids.filter(id => !groupIds.includes(id)), source: 'manual' }
-  }
-  return { ids: [...new Set([...sel.ids, ...groupIds])], source: 'manual' }
+  const same = sel.ids.length === groupIds.length && groupIds.every(id => sel.ids.includes(id))
+  if (same) return { ids: [], source: 'manual' }                     // grup yang sedang terpilih diketuk lagi → turun
+  return { ids: [...groupIds], source: 'manual' }                    // dek utama / grup lain → diganti grup ini
+}
+
+// GROUP hanya untuk ≥2 kartu yang seluruhnya berasal dari dek utama (bukan dari grup mana pun).
+export function canGroupSelection(selectedIds, groups) {
+  if (selectedIds.length < 2) return false
+  const grouped = new Set(groups.flat())
+  return selectedIds.every(id => !grouped.has(id))
 }
 
 // Posisi tombol di atas sekumpulan kartu: tengah-tengah rentang horizontal, di atas kartu tertinggi.

@@ -240,6 +240,132 @@ t('game/room baru: grup dan seleksi direset (id kartu dipakai ulang antar game)'
   assert.deepEqual(next.groups, []); assert.equal(next.key, 'ROOM:2')
 })
 
+// ── REGRESSI BUG 1: Full House — Pair independen terkunci, hanya Tris yang berganti ─────────────
+const fh = (ids) => (listAvailableCombos(cards(...ids)).fullhouse || []).map(x => [...x.ids].sort().join(','))
+const sorted = (...ids) => ids.sort().join(',')
+t('Full House: 555 + 666 + 22 → 555+22 lalu 666+22 (Pair 22 tetap, hanya Tris berganti)', () => {
+  assert.deepEqual(fh(['5D','5C','5H','6D','6C','6H','2D','2C']), [sorted('5D','5C','5H','2D','2C'), sorted('6D','6C','6H','2D','2C')])
+})
+t('Full House: tanpa Pair independen (hanya 555 dan 666) → 555+66 dan 666+55 diizinkan', () => {
+  assert.deepEqual(fh(['5D','5C','5H','6D','6C','6H']), [sorted('5D','5C','5H','6D','6C'), sorted('5D','5C','6D','6C','6H')])   // 555+66 lalu 666+55
+})
+t('Full House: beberapa Pair independen → satu Pair yang sama (terlemah) dipakai di semua alternatif', () => {
+  const r = fh(['5D','5C','5H','6D','6C','6H','2D','2C','7D','7S'])
+  assert.deepEqual(r, [sorted('5D','5C','5H','7D','7S'), sorted('6D','6C','6H','7D','7S')])
+})
+t('Full House: tiga tris tanpa Pair independen → Pair berasal dari pemecahan tris lain', () => {
+  const r = fh(['5D','5C','5H','6D','6C','6H','7D','7C','7H'])
+  assert.equal(r.length, 3)
+  for (const x of r) assert.equal(x.split(',').length, 5)
+})
+t('Full House: Pair independen + Four of a Kind → Tris diambil dari quad, Pair tetap independen', () => {
+  const r = fh(['5D','5C','5H','5S','2D','2C'])
+  assert.equal(r.length, 1); assert.ok(r[0].includes('2C') && r[0].includes('2D'))
+})
+t('Full House: siklus klik mengganti Tris saja; Pair independen identik di tiap alternatif, lalu kembali ke pertama', () => {
+  const av = listAvailableCombos(cards('5D','5C','5H','6D','6C','6H','2D','2C'))
+  let last = null, sel = [], seen = []
+  for (let i = 0; i < 3; i++) { const r = pickNext(av, 'fullhouse', last, sel); seen.push([...r.ids].sort().join(',')); last = { type: 'fullhouse', index: r.index }; sel = r.ids }
+  assert.deepEqual(seen, [sorted('5D','5C','5H','2D','2C'), sorted('6D','6C','6H','2D','2C'), sorted('5D','5C','5H','2D','2C')])
+})
+t('properti (500 tangan acak): ada Pair independen ⇒ semua Full House memakai Pair itu; tidak ada ⇒ Pair dari pemecahan', () => {
+  let withPair = 0, withoutPair = 0
+  for (let n = 0; n < 500; n++) {
+    const hand = randomHand(8 + Math.floor(rnd() * 6))
+    const cnt = {}; for (const c of hand) cnt[c.rank] = (cnt[c.rank] || 0) + 1
+    const list = listAvailableCombos(hand).fullhouse || []
+    const independent = Object.keys(cnt).filter(r => cnt[r] === 2)
+    const pairRanks = list.map(x => { const cs = cards(...x.ids); const c = {}; for (const k of cs) c[k.rank] = (c[k.rank] || 0) + 1; return Object.keys(c).find(r => c[r] === 2) })
+    if (!list.length) continue
+    if (independent.length) {
+      withPair++
+      assert.ok(pairRanks.every(r => cnt[r] === 2), `Pair independen tidak dipakai pada ${hand.map(c => c.id)}`)
+      assert.equal(new Set(pairRanks).size, 1, `Pair berubah antar alternatif pada ${hand.map(c => c.id)}`)
+    } else {
+      withoutPair++
+      assert.ok(pairRanks.every(r => cnt[r] >= 3), `Pair seharusnya hasil pemecahan pada ${hand.map(c => c.id)}`)
+    }
+  }
+  assert.ok(withPair > 5 && withoutPair > 5, `sampel kurang beragam (${withPair}/${withoutPair})`)
+})
+
+// ── REGRESI BUG 2: seleksi dek utama dan Group Chain eksklusif ──────────────────────────────
+const twoGroups = () => {                       // grup A = [3D,3C], grup B = [5D,5H]; dek utama = sisanya
+  let st = start()
+  for (const id of ['3D', '3C']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })
+  for (const id of ['5D', '5H']) st = step(st, { type: 'tapCard', id }); st = step(st, { type: 'group' })
+  assert.deepEqual(st.ui.groups, [['3D', '3C'], ['5D', '5H']]); assert.deepEqual(st.sel, [])
+  return st
+}
+const sameGroups = (st, before) => assert.deepEqual(st.ui.groups, before.ui.groups, 'Group Chain tidak boleh berubah saat berpindah sumber seleksi')
+t('dek utama → klik grup: seleksi dek dibersihkan, seluruh kartu grup aktif, tidak ada GROUP/penggabungan', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'tapCard', id: '9S' }); st = step(st, { type: 'tapCard', id: 'JS' })
+  assert.equal(G.canGroupSelection(st.sel, st.ui.groups), true)          // sebelum pindah: GROUP tersedia
+  st = step(st, { type: 'tapGroup', index: 0 })
+  assert.deepEqual(st.sel, ['3D', '3C']); sameGroups(st, base)
+  assert.equal(G.canGroupSelection(st.sel, st.ui.groups), false)         // sesudah pindah: GROUP tidak muncul
+})
+t('Group A → klik Group B: A turun, B naik', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'tapGroup', index: 0 }); assert.deepEqual(st.sel, ['3D', '3C'])
+  st = step(st, { type: 'tapGroup', index: 1 })
+  assert.deepEqual(st.sel, ['5D', '5H']); sameGroups(st, base)
+  assert.equal(G.canGroupSelection(st.sel, st.ui.groups), false)
+})
+t('Group → klik dek utama: grup turun, seleksi dek utama aktif; kartu berikutnya menambah seleksi dek', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'tapGroup', index: 1 })
+  st = step(st, { type: 'tapCard', id: '9S' })
+  assert.deepEqual(st.sel, ['9S']); sameGroups(st, base)                 // grup turun, tidak tergabung
+  assert.equal(G.canGroupSelection(st.sel, st.ui.groups), false)         // baru 1 kartu dek → belum ada GROUP
+  st = step(st, { type: 'tapCard', id: 'JS' })
+  assert.deepEqual(st.sel, ['9S', 'JS']); assert.equal(G.canGroupSelection(st.sel, st.ui.groups), true)   // ≥2 kartu dek → GROUP
+})
+t('klik grup yang sedang terpilih lagi → turun; rangkaian berpindah-pindah tidak pernah mengubah grup', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'tapGroup', index: 0 }); st = step(st, { type: 'tapGroup', index: 0 })
+  assert.deepEqual(st.sel, [])
+  for (const a of [{ type: 'tapCard', id: '4H' }, { type: 'tapGroup', index: 1 }, { type: 'tapCard', id: '7S' }, { type: 'tapGroup', index: 0 }, { type: 'tapCard', id: '2D' }, { type: 'tapGroup', index: 1 }]) {
+    st = step(st, a); sameGroups(st, base)
+  }
+  assert.deepEqual(st.sel, ['5D', '5H'])
+})
+t('GROUP hanya untuk ≥2 kartu dek utama: <2, memuat kartu grup, atau seleksi campuran Combo Detector → tidak boleh', () => {
+  const base = twoGroups()
+  assert.equal(G.canGroupSelection(['9S'], base.ui.groups), false)
+  assert.equal(G.canGroupSelection(['9S', 'JS'], base.ui.groups), true)
+  assert.equal(G.canGroupSelection(['9S', '3D'], base.ui.groups), false)            // satu kartu berasal dari grup
+  assert.equal(G.canGroupSelection(['3D', '3C'], base.ui.groups), false)            // grup utuh
+  // Combo Detector memilih tris 3D,3C (grup) + 3S (dek): campuran → tanpa GROUP, aksi 'group' tidak berefek
+  let st = step(base, { type: 'detector', available: listAvailableCombos(cards(...H)), kind: 'tris' })
+  assert.deepEqual([...st.sel].sort(), ['3C', '3D', '3S']); assert.equal(G.canGroupSelection(st.sel, st.ui.groups), false)
+  const after = step(st, { type: 'group' }); assert.deepEqual(after.ui.groups, base.ui.groups); assert.deepEqual(after.sel, st.sel)
+})
+t('Combo Detector yang hanya memilih kartu dek utama (≥2) tetap boleh di-GROUP', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'detector', available: listAvailableCombos(cards(...H)), kind: 'pair' })
+  const cand = st.sel
+  if (cand.every(id => !base.ui.groups.flat().includes(id))) assert.equal(G.canGroupSelection(cand, base.ui.groups), true)
+  else { st = step(base, { type: 'detector', available: listAvailableCombos(cards('9S', 'JS', 'KS', '2D')), kind: 'single' }); assert.equal(G.canGroupSelection(st.sel, base.ui.groups), false) }
+})
+t('seleksi dek utama dibuat lewat klik manual lalu GROUP tetap membuat grup baru', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'tapCard', id: '9S' }); st = step(st, { type: 'tapCard', id: 'JS' }); st = step(st, { type: 'group' })
+  assert.deepEqual(st.ui.groups, [['3D', '3C'], ['5D', '5H'], ['9S', 'JS']]); assert.deepEqual(st.sel, [])
+})
+t('UNGROUP, CLEAR, Combo Detector tetap berfungsi setelah berpindah sumber seleksi', () => {
+  const base = twoGroups()
+  let st = step(base, { type: 'tapCard', id: '9S' }); st = step(st, { type: 'tapGroup', index: 0 })
+  st = step(st, { type: 'ungroup', index: 0 })
+  assert.deepEqual(st.ui.groups, [['5D', '5H']]); assert.deepEqual(st.sel, [])
+  assert.ok(G.mainDeckIds(H, st.ui.groups).includes('3D') && G.mainDeckIds(H, st.ui.groups).includes('3C'))
+  st = step(st, { type: 'tapGroup', index: 0 }); st = step(st, { type: 'clear' })
+  assert.deepEqual(st.sel, []); assert.deepEqual(st.ui.groups, [['5D', '5H']])
+  st = step(st, { type: 'tapGroup', index: 0 }); st = step(st, { type: 'detector', available: listAvailableCombos(cards(...H)), kind: 'single' })
+  assert.equal(st.sel.length, 1)                                                  // detektor menggantikan seleksi grup
+})
+
 // ── PLAY: legalitas di klien = aturan engine ─────────────────────────────────
 const legal = (sel, table) => { const c = detectCombo(cards(...sel)); return !!c && (!table || canBeat(c, detectCombo(cards(...table)))) }
 t('legalitas PLAY: meja kosong = kombinasi sah; meja terisi harus tipe sama dan lebih kuat', () => {

@@ -5,7 +5,7 @@ import { emitSocket } from '../hooks/useSocket'
 import GameSyncWaiting from '../components/GameSyncWaiting'
 import { detectCombo, canBeat, sortHand, comboLabel, cardLabel, displayOrder, SUIT_SYM, IS_RED } from '../utils/comboDetector'
 import { COMBO_TYPES, listAvailableCombos, activePickOf } from '../utils/comboPicker'
-import { mainDeckIds, isGroupSelected, anchorAbove } from '../utils/groupChain'
+import { mainDeckIds, isGroupSelected, anchorAbove, canGroupSelection } from '../utils/groupChain'
 import { INITIAL_UI, syncUi, reduceHandUi } from '../utils/handUi'
 
 /* ── palette ─────────────────────────────────────────────── */
@@ -54,7 +54,7 @@ export default function GamePage() {
   const groups = ui.groups
   const deckIds   = mainDeckIds(handIds, groups)
   const cardById  = Object.fromEntries(myHand.map(c => [c.id, c]))
-  const exactGroup = groups.some(g => g.length === selIds.length && isGroupSelected(g, selIds))
+  const canGroup  = canGroupSelection(selIds, groups)   // GROUP hanya untuk ≥2 kartu dek utama
 
   /* ── posisi tombol GROUP / UNGROUP (diukur dari DOM) ─────── */
   const wrapRef = useRef(null)
@@ -68,7 +68,7 @@ export default function GamePage() {
       const el = cardEls.current.get(id)
       return el && wrap ? { ...offsetWithin(el, wrap), width: el.offsetWidth } : null
     }
-    const group = wrap && selIds.length >= 2 && !exactGroup ? anchorAbove(selIds.map(rectOf).filter(Boolean)) : null
+    const group = wrap && canGroup ? anchorAbove(selIds.map(rectOf).filter(Boolean)) : null
     const ungroup = wrap ? groups.map((g, index) => {
       if (!isGroupSelected(g, selIds)) return null
       const a = anchorAbove(g.map(rectOf).filter(Boolean))
