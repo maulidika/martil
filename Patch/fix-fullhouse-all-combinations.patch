@@ -1,0 +1,184 @@
+diff --git a/frontend/src/utils/comboPicker.js b/frontend/src/utils/comboPicker.js
+index ad2fe99..15bc53d 100644
+--- a/frontend/src/utils/comboPicker.js
++++ b/frontend/src/utils/comboPicker.js
+@@ -29,6 +29,7 @@ function* subsets(arr, k, start = 0, acc = []) {
+  * @returns {Record<string, {ids: string[], combo: object}[]>} per jenis, urut terlemah → terkuat.
+  * Kandidat yang sama kuat (mis. Four of a Kind dengan kartu ke-5 berbeda) hanya diwakili satu:
+  * yang tersusun dari kartu terendah, supaya siklus klik tidak berisi pilihan yang setara.
++ * Pengecualian: Full House (lihat fullHouseAlternatives) — setiap kombinasi Tris × Pair adalah alternatif tersendiri.
+  */
+ export function listAvailableCombos(hand) {
+   const cards = sortHand(hand || [])
+@@ -41,26 +42,30 @@ export function listAvailableCombos(hand) {
+       ;(byType[typeKeyOf(combo)] ||= []).push({ ids: sub.map(c => c.id), combo })
+     }
+   }
+-  // Full House: pasangan (Pair) dibedakan antara yang independen (rank berjumlah tepat 2 di tangan)
+-  // dan yang hasil pemecahan Three/Four of a Kind (rank berjumlah ≥3).
++  // Full House: SEMUA kombinasi Tris × Pair yang valid. Server menilai kekuatan Full House hanya dari rank Tris,
++  // sehingga 77+666 dan JJ+666 "setara"; karena itu dedupe untuk jenis ini memakai pasangan (tris, pair),
++  // bukan kekuatan, supaya tiap alternatif tetap bisa dipilih.
++  // Pair kandidat: Pair independen (rank berjumlah tepat 2 di tangan) bila ada; bila tidak ada, Pair hasil
++  // pemecahan Three/Four of a Kind (rank berjumlah ≥3) tetap boleh dipakai.
+   const rankCount = cards.reduce((m, c) => (m[c.rank] = (m[c.rank] || 0) + 1, m), {})
+-  const pairInfo = (combo) => {
++  const fhParts = (combo) => {
+     const counts = combo.cards.reduce((m, c) => (m[c.rank] = (m[c.rank] || 0) + 1, m), {})
+-    const rank = Object.keys(counts).find(r => counts[r] === 2)
+-    return { rank, card: combo.cards.find(c => c.rank === rank) }
++    const pair = Object.keys(counts).find(r => counts[r] === 2)
++    return { three: Object.keys(counts).find(r => counts[r] === 3), pair, pairCard: combo.cards.find(c => c.rank === pair) }
+   }
+-  // Urutan prioritas antar Full House yang setara kuat (tris sama): Pair independen dulu, lalu Pair terlemah.
+-  // Dengan begitu bila ada Pair independen, semua alternatif Full House memakai Pair yang SAMA dan hanya Tris
+-  // yang berganti; bila tidak ada, Pair boleh berasal dari pemecahan tris lain (555+66, 666+55).
+-  const pairPref = (a, b) => {
+-    const pa = pairInfo(a.combo), pb = pairInfo(b.combo)
+-    const ia = rankCount[pa.rank] === 2 ? 0 : 1, ib = rankCount[pb.rank] === 2 ? 0 : 1
+-    return ia - ib || compareCards(pa.card, pb.card)
++  const fullHouseAlternatives = (list) => {
++    const info = list.map((x, i) => ({ x, i, ...fhParts(x.combo) }))
++    const hasIndependent = info.some(f => rankCount[f.pair] === 2)
++    const pool = hasIndependent ? info.filter(f => rankCount[f.pair] === 2) : info
++    // Urutan konsisten: Tris terlemah → terkuat; pada Tris yang sama, Pair terlemah → terkuat.
++    pool.sort((a, b) => compareCombos(a.x.combo, b.x.combo) || compareCards(a.pairCard, b.pairCard) || a.i - b.i)
++    const seen = new Set()
++    return pool.filter(f => { const k = `${f.three}|${f.pair}`; if (seen.has(k)) return false; seen.add(k); return true }).map(f => f.x)
+   }
+   for (const key of Object.keys(byType)) {
+-    const tie = key === 'fullhouse' ? pairPref : () => 0
++    if (key === 'fullhouse') { byType[key] = fullHouseAlternatives(byType[key]); continue }
+     const sorted = byType[key].map((x, i) => ({ x, i }))
+-      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || tie(a.x, b.x) || a.i - b.i)
++      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || a.i - b.i)
+       .map(({ x }) => x)
+     byType[key] = sorted.filter((x, i) => i === 0 || compareCombos(x.combo, sorted[i - 1].combo) !== 0)
+   }
+diff --git a/frontend/tests/combo-ui/run.mjs b/frontend/tests/combo-ui/run.mjs
+index 513038b..6bd85ec 100644
+--- a/frontend/tests/combo-ui/run.mjs
++++ b/frontend/tests/combo-ui/run.mjs
+@@ -45,12 +45,17 @@ t('properti (300 tangan acak): jenis & urutan kandidat sama dengan brute force m
+     for (const [k, list] of Object.entries(av)) {
+       for (let i = 1; i < list.length; i++) {
+         const lo = server.detectCombo(cards(...list[i - 1].ids)), hi = server.detectCombo(cards(...list[i].ids))
+-        assert.ok(server.canBeat(hi, lo) && !server.canBeat(lo, hi), `${k}: urutan salah menurut server`)
++        // Full House: alternatif dengan Tris sama setara kuat (beda Pair) → cukup tidak menurun; jenis lain harus naik ketat
++        if (k === 'fullhouse') assert.ok(!server.canBeat(lo, hi), `${k}: urutan menurun menurut server`)
++        else assert.ok(server.canBeat(hi, lo) && !server.canBeat(lo, hi), `${k}: urutan salah menurut server`)
+       }
+       // jumlah kandidat = jumlah tingkat kekuatan berbeda menurut server
+       const classes = []
+       for (const c of expectTypes.get(k)) if (!classes.some(x => !server.canBeat(c, x) && !server.canBeat(x, c))) classes.push(c)
+-      assert.equal(list.length, classes.length, `${k}: jumlah kandidat berbeda`)
++      if (k === 'fullhouse') {   // tiap kelas kekuatan (Tris) terwakili; alternatif Pair menambah jumlah
++        assert.ok(list.length >= classes.length, `${k}: kelas kekuatan hilang`)
++        for (const c of classes) assert.ok(list.some(x => { const y = server.detectCombo(cards(...x.ids)); return !server.canBeat(c, y) && !server.canBeat(y, c) }), `${k}: kelas Tris hilang`)
++      } else assert.equal(list.length, classes.length, `${k}: jumlah kandidat berbeda`)
+     }
+   }
+ })
+@@ -243,20 +248,26 @@ t('game/room baru: grup dan seleksi direset (id kartu dipakai ulang antar game)'
+ // ── REGRESSI BUG 1: Full House — Pair independen terkunci, hanya Tris yang berganti ─────────────
+ const fh = (ids) => (listAvailableCombos(cards(...ids)).fullhouse || []).map(x => [...x.ids].sort().join(','))
+ const sorted = (...ids) => ids.sort().join(',')
++// "Tris+Pair" sebagai rank, dari string id yang dipisah koma
++const fhShape = (csv) => { const c = {}; for (const id of csv.split(',')) c[id.slice(0, -1)] = (c[id.slice(0, -1)] || 0) + 1; return `${Object.keys(c).find(r => c[r] === 3)}+${Object.keys(c).find(r => c[r] === 2)}` }
+ t('Full House: 555 + 666 + 22 → 555+22 lalu 666+22 (Pair 22 tetap, hanya Tris berganti)', () => {
+   assert.deepEqual(fh(['5D','5C','5H','6D','6C','6H','2D','2C']), [sorted('5D','5C','5H','2D','2C'), sorted('6D','6C','6H','2D','2C')])
+ })
+ t('Full House: tanpa Pair independen (hanya 555 dan 666) → 555+66 dan 666+55 diizinkan', () => {
+   assert.deepEqual(fh(['5D','5C','5H','6D','6C','6H']), [sorted('5D','5C','5H','6D','6C'), sorted('5D','5C','6D','6C','6H')])   // 555+66 lalu 666+55
+ })
+-t('Full House: beberapa Pair independen → satu Pair yang sama (terlemah) dipakai di semua alternatif', () => {
++t('Full House: beberapa Pair independen → semua kombinasi Tris × Pair (urut Tris, lalu Pair terlemah → terkuat)', () => {
+   const r = fh(['5D','5C','5H','6D','6C','6H','2D','2C','7D','7S'])
+-  assert.deepEqual(r, [sorted('5D','5C','5H','7D','7S'), sorted('6D','6C','6H','7D','7S')])
++  assert.deepEqual(r, [
++    sorted('5D','5C','5H','7D','7S'), sorted('5D','5C','5H','2D','2C'),
++    sorted('6D','6C','6H','7D','7S'), sorted('6D','6C','6H','2D','2C'),
++  ])
+ })
+-t('Full House: tiga tris tanpa Pair independen → Pair berasal dari pemecahan tris lain', () => {
++t('Full House: tiga tris tanpa Pair independen → 6 kombinasi, Pair dari pemecahan tris lain', () => {
+   const r = fh(['5D','5C','5H','6D','6C','6H','7D','7C','7H'])
+-  assert.equal(r.length, 3)
+-  for (const x of r) assert.equal(x.split(',').length, 5)
++  assert.equal(r.length, 6)
++  assert.equal(new Set(r).size, 6)
++  assert.deepEqual(r.map(x => fhShape(x)), ['5+6', '5+7', '6+5', '6+7', '7+5', '7+6'])   // Tris+Pair
+ })
+ t('Full House: Pair independen + Four of a Kind → Tris diambil dari quad, Pair tetap independen', () => {
+   const r = fh(['5D','5C','5H','5S','2D','2C'])
+@@ -268,27 +279,59 @@ t('Full House: siklus klik mengganti Tris saja; Pair independen identik di tiap
+   for (let i = 0; i < 3; i++) { const r = pickNext(av, 'fullhouse', last, sel); seen.push([...r.ids].sort().join(',')); last = { type: 'fullhouse', index: r.index }; sel = r.ids }
+   assert.deepEqual(seen, [sorted('5D','5C','5H','2D','2C'), sorted('6D','6C','6H','2D','2C'), sorted('5D','5C','5H','2D','2C')])
+ })
+-t('properti (500 tangan acak): ada Pair independen ⇒ semua Full House memakai Pair itu; tidak ada ⇒ Pair dari pemecahan', () => {
++t('properti (500 tangan acak): Full House = seluruh kombinasi Tris × Pair (independen bila ada, jika tidak pemecahan)', () => {
+   let withPair = 0, withoutPair = 0
+   for (let n = 0; n < 500; n++) {
+     const hand = randomHand(8 + Math.floor(rnd() * 6))
+     const cnt = {}; for (const c of hand) cnt[c.rank] = (cnt[c.rank] || 0) + 1
+     const list = listAvailableCombos(hand).fullhouse || []
++    const triples = Object.keys(cnt).filter(r => cnt[r] >= 3)
+     const independent = Object.keys(cnt).filter(r => cnt[r] === 2)
+-    const pairRanks = list.map(x => { const cs = cards(...x.ids); const c = {}; for (const k of cs) c[k.rank] = (c[k.rank] || 0) + 1; return Object.keys(c).find(r => c[r] === 2) })
+-    if (!list.length) continue
+-    if (independent.length) {
+-      withPair++
+-      assert.ok(pairRanks.every(r => cnt[r] === 2), `Pair independen tidak dipakai pada ${hand.map(c => c.id)}`)
+-      assert.equal(new Set(pairRanks).size, 1, `Pair berubah antar alternatif pada ${hand.map(c => c.id)}`)
+-    } else {
+-      withoutPair++
+-      assert.ok(pairRanks.every(r => cnt[r] >= 3), `Pair seharusnya hasil pemecahan pada ${hand.map(c => c.id)}`)
+-    }
++    const pairs = independent.length ? independent : triples
++    const expected = new Set(); for (const t3 of triples) for (const p of pairs) if (t3 !== p) expected.add(`${t3}+${p}`)
++    const got = list.map(x => fhShape(x.ids.join(',')))
++    assert.equal(new Set(got).size, got.length, `alternatif ganda pada ${hand.map(c => c.id)}`)
++    assert.deepEqual(new Set(got), expected, `kombinasi tidak lengkap pada ${hand.map(c => c.id)}`)
++    for (const x of list) assert.ok(server.detectCombo(cards(...x.ids))?.subtype === 'fullhouse')
++    if (expected.size) (independent.length ? withPair++ : withoutPair++)
+   }
+   assert.ok(withPair > 5 && withoutPair > 5, `sampel kurang beragam (${withPair}/${withoutPair})`)
+ })
+ 
++// ── REGRESI Full House: 7 7 6 6 6 J J Q Q Q → keempat alternatif dapat dipilih ──────────────────
++const FH_HAND = ['7D','7C','6D','6C','6H','JD','JC','QD','QC','QH']
++t('Full House 7 7 6 6 6 J J Q Q Q: persis 4 alternatif (77+666, 77+QQQ, JJ+666, JJ+QQQ), tanpa Pair hasil pemecahan', () => {
++  const r = fh(FH_HAND)
++  assert.equal(r.length, 4)
++  assert.deepEqual(new Set(r), new Set([
++    sorted('7D','7C','6D','6C','6H'), sorted('7D','7C','QD','QC','QH'),
++    sorted('JD','JC','6D','6C','6H'), sorted('JD','JC','QD','QC','QH'),
++  ]))
++  assert.deepEqual(r.map(fhShape), ['6+7', '6+J', 'Q+7', 'Q+J'])   // urutan konsisten: Tris, lalu Pair
++})
++t('Full House 7 7 6 6 6 J J Q Q Q: klik berulang melewati keempat alternatif lalu kembali ke yang pertama', () => {
++  const av = listAvailableCombos(cards(...FH_HAND))
++  let last = null, sel = [], seen = []
++  for (let i = 0; i < 9; i++) { const r = pickNext(av, 'fullhouse', last, sel); seen.push([...r.ids].sort().join(',')); last = { type: 'fullhouse', index: r.index }; sel = r.ids }
++  assert.equal(new Set(seen.slice(0, 4)).size, 4)             // 4 pilihan berbeda
++  assert.deepEqual(seen.slice(4, 8), seen.slice(0, 4))         // putaran kedua identik
++  assert.equal(seen[8], seen[0])
++})
++t('Full House 7 7 6 6 6 J J Q Q Q: lewat reducer (klik tombol Full House), keempatnya terpilih berurutan dan sah menurut server', () => {
++  const hand = FH_HAND, avh = listAvailableCombos(cards(...hand))
++  let st = { ui: syncUi(INITIAL_UI, 'R:1', hand), sel: [] }; const seen = []
++  for (let i = 0; i < 5; i++) { const r = reduceHandUi(st.ui, st.sel, hand, { type: 'detector', available: avh, kind: 'fullhouse' }); st = { ui: r.ui, sel: r.selIds }; seen.push([...st.sel].sort().join(',')); assert.equal(server.detectCombo(cards(...st.sel))?.subtype, 'fullhouse') }
++  assert.equal(new Set(seen.slice(0, 4)).size, 4); assert.equal(seen[4], seen[0])
++})
++t('Full House: tiap alternatif benar-benar kombinasi sah dan nilainya sama menurut Tris (77+666 setara JJ+666 di server)', () => {
++  const [a, b] = fh(FH_HAND).slice(0, 2).map(x => server.detectCombo(cards(...x.split(','))))
++  assert.ok(!server.canBeat(a, b) && !server.canBeat(b, a))
++})
++t('Full House: Pair hasil pemecahan tetap tersedia bila memang diperlukan (tanpa Pair independen)', () => {
++  const r = fh(['7D','7C','7H','QD','QC','QH'])
++  assert.deepEqual(r.map(fhShape), ['7+Q', 'Q+7'])
++})
++
+ // ── REGRESI BUG 2: seleksi dek utama dan Group Chain eksklusif ──────────────────────────────
+ const twoGroups = () => {                       // grup A = [3D,3C], grup B = [5D,5H]; dek utama = sisanya
+   let st = start()

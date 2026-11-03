@@ -29,6 +29,7 @@ function* subsets(arr, k, start = 0, acc = []) {
  * @returns {Record<string, {ids: string[], combo: object}[]>} per jenis, urut terlemah → terkuat.
  * Kandidat yang sama kuat (mis. Four of a Kind dengan kartu ke-5 berbeda) hanya diwakili satu:
  * yang tersusun dari kartu terendah, supaya siklus klik tidak berisi pilihan yang setara.
+ * Pengecualian: Full House (lihat fullHouseAlternatives) — setiap kombinasi Tris × Pair adalah alternatif tersendiri.
  */
 export function listAvailableCombos(hand) {
   const cards = sortHand(hand || [])
@@ -41,26 +42,30 @@ export function listAvailableCombos(hand) {
       ;(byType[typeKeyOf(combo)] ||= []).push({ ids: sub.map(c => c.id), combo })
     }
   }
-  // Full House: pasangan (Pair) dibedakan antara yang independen (rank berjumlah tepat 2 di tangan)
-  // dan yang hasil pemecahan Three/Four of a Kind (rank berjumlah ≥3).
+  // Full House: SEMUA kombinasi Tris × Pair yang valid. Server menilai kekuatan Full House hanya dari rank Tris,
+  // sehingga 77+666 dan JJ+666 "setara"; karena itu dedupe untuk jenis ini memakai pasangan (tris, pair),
+  // bukan kekuatan, supaya tiap alternatif tetap bisa dipilih.
+  // Pair kandidat: Pair independen (rank berjumlah tepat 2 di tangan) bila ada; bila tidak ada, Pair hasil
+  // pemecahan Three/Four of a Kind (rank berjumlah ≥3) tetap boleh dipakai.
   const rankCount = cards.reduce((m, c) => (m[c.rank] = (m[c.rank] || 0) + 1, m), {})
-  const pairInfo = (combo) => {
+  const fhParts = (combo) => {
     const counts = combo.cards.reduce((m, c) => (m[c.rank] = (m[c.rank] || 0) + 1, m), {})
-    const rank = Object.keys(counts).find(r => counts[r] === 2)
-    return { rank, card: combo.cards.find(c => c.rank === rank) }
+    const pair = Object.keys(counts).find(r => counts[r] === 2)
+    return { three: Object.keys(counts).find(r => counts[r] === 3), pair, pairCard: combo.cards.find(c => c.rank === pair) }
   }
-  // Urutan prioritas antar Full House yang setara kuat (tris sama): Pair independen dulu, lalu Pair terlemah.
-  // Dengan begitu bila ada Pair independen, semua alternatif Full House memakai Pair yang SAMA dan hanya Tris
-  // yang berganti; bila tidak ada, Pair boleh berasal dari pemecahan tris lain (555+66, 666+55).
-  const pairPref = (a, b) => {
-    const pa = pairInfo(a.combo), pb = pairInfo(b.combo)
-    const ia = rankCount[pa.rank] === 2 ? 0 : 1, ib = rankCount[pb.rank] === 2 ? 0 : 1
-    return ia - ib || compareCards(pa.card, pb.card)
+  const fullHouseAlternatives = (list) => {
+    const info = list.map((x, i) => ({ x, i, ...fhParts(x.combo) }))
+    const hasIndependent = info.some(f => rankCount[f.pair] === 2)
+    const pool = hasIndependent ? info.filter(f => rankCount[f.pair] === 2) : info
+    // Urutan konsisten: Tris terlemah → terkuat; pada Tris yang sama, Pair terlemah → terkuat.
+    pool.sort((a, b) => compareCombos(a.x.combo, b.x.combo) || compareCards(a.pairCard, b.pairCard) || a.i - b.i)
+    const seen = new Set()
+    return pool.filter(f => { const k = `${f.three}|${f.pair}`; if (seen.has(k)) return false; seen.add(k); return true }).map(f => f.x)
   }
   for (const key of Object.keys(byType)) {
-    const tie = key === 'fullhouse' ? pairPref : () => 0
+    if (key === 'fullhouse') { byType[key] = fullHouseAlternatives(byType[key]); continue }
     const sorted = byType[key].map((x, i) => ({ x, i }))
-      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || tie(a.x, b.x) || a.i - b.i)
+      .sort((a, b) => compareCombos(a.x.combo, b.x.combo) || a.i - b.i)
       .map(({ x }) => x)
     byType[key] = sorted.filter((x, i) => i === 0 || compareCombos(x.combo, sorted[i - 1].combo) !== 0)
   }
