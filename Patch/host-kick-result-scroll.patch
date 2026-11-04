@@ -1,0 +1,1387 @@
+diff --git a/backend/package.json b/backend/package.json
+index 3775a5c..f9087ea 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -9,7 +9,8 @@
+     "test": "jest",
+     "test:sim": "node tests/reconnect.sim.js",
+     "test:combo": "node tests/combo.consistency.js",
+-    "test:nav": "node tests/room-navigation.sim.js"
++    "test:nav": "node tests/room-navigation.sim.js",
++    "test:kick": "node tests/kick.sim.js"
+   },
+   "dependencies": {
+     "bcryptjs": "^3.0.3",
+diff --git a/backend/src/rooms/roomManager.js b/backend/src/rooms/roomManager.js
+index fa47e4d..75d79e6 100644
+--- a/backend/src/rooms/roomManager.js
++++ b/backend/src/rooms/roomManager.js
+@@ -16,9 +16,18 @@ const REMOVAL_MEMORY_MS    = 10 * 60_000;  // berapa lama alasan "dikeluarkan" d
+ // userId → { code, reason, at } — agar pemain yang kembali setelah dikeluarkan mendapat pesan yang jelas
+ const removals = new Map();
+ 
++// userId → { code, setResult, connected, disconnectedAt, socketId, at }
++// Pemain yang di-Kick oleh Host saat berada di Result. Mereka dikeluarkan dari room.players (kursi bebas,
++// tidak menahan host) tetapi tetap boleh melihat hasil set (salinan setResult disimpan di sini) dan TIDAK boleh
++// kembali ke Room sebelum kembali ke Homepage (leave_room) atau terkena timeout disconnect yang sama
++// dengan pemain biasa (RECONNECT_WINDOW_MS). Disimpan di server agar refresh/reconnect tidak menghapusnya.
++const restrictions = new Map();
++
+ // ─── Room creation & joining ─────────────────────────────────────────────────
+ 
+ function createRoom(hostId, maxGames = 4) {
++  if (restrictions.has(hostId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
++  if (removals.get(hostId)?.reason === 'KICKED') removals.delete(hostId);
+   const code = generateCode();
+   const roomId = uuidv4();
+ 
+@@ -47,6 +56,7 @@ function createRoom(hostId, maxGames = 4) {
+ }
+ 
+ function joinRoom(code, playerId) {
++  if (restrictions.has(playerId))                  return { ok: false, error: 'KICKED_FROM_ROOM' };
+   const room = rooms.get(code);
+   if (!room)                                       return { ok: false, error: 'ROOM_NOT_FOUND' };
+   if (room.status === 'playing')                   return { ok: false, error: 'GAME_ALREADY_STARTED' };
+@@ -57,6 +67,7 @@ function joinRoom(code, playerId) {
+   // ada yang keluar): room kembali ke status waiting untuk set berikutnya.
+   const reset = room.status === 'done' ? _resetRoomForNewSet(room) : false;
+ 
++  if (removals.get(playerId)?.reason === 'KICKED') removals.delete(playerId);   // Kick bukan blacklist: boleh bergabung lagi
+   room.players.push({ id: playerId, connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
+   return { ok: true, room, reset };
+ }
+@@ -253,6 +264,7 @@ function leaveRoom(code, playerId) {
+  * berikutnya dari pemain lain hanya menandai mereka sudah kembali. Idempoten.
+  */
+ function returnToRoom(code, playerId) {
++  if (restrictions.has(playerId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
+   const room = rooms.get(code);
+   if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
+   const p = room.players.find(p => p.id === playerId);
+@@ -273,6 +285,74 @@ function restoreView(room, playerId) {
+   return 'room';
+ }
+ 
++/**
++ * Host mengeluarkan pemain (Kick). Semua validasi ada di sini (server adalah sumber kebenaran).
++ *  - hanya Host; tidak boleh mengeluarkan diri sendiri; tidak boleh saat game berlangsung;
++ *  - mode 'room'   : target ada di Room → dihapus dari room, boleh bergabung lagi (bukan ban);
++ *  - mode 'result' : target masih di Result (set selesai) → dihapus dari room tetapi tetap melihat hasil,
++ *                    dengan pembatasan sampai kembali ke Homepage (lihat `restrictions`).
++ */
++function kickPlayer(code, hostId, targetId, now = Date.now()) {
++  const room = rooms.get(code);
++  if (!room)                     return { ok: false, error: 'ROOM_NOT_FOUND' };
++  if (room.hostId !== hostId)    return { ok: false, error: 'NOT_HOST' };
++  if (hostId === targetId)       return { ok: false, error: 'CANNOT_KICK_SELF' };
++  if (room.status === 'playing') return { ok: false, error: 'GAME_IN_PROGRESS' };
++
++  const idx = room.players.findIndex(p => p.id === targetId);
++  if (idx === -1)                return { ok: false, error: 'TARGET_NOT_IN_ROOM' };
++  const target = room.players[idx];
++
++  const mode = room.setResult && (room.status === 'done' || target.inRoom === false) ? 'result' : 'room';
++  room.players.splice(idx, 1);
++
++  if (mode === 'result') {
++    restrictions.set(targetId, {
++      code,
++      maxGames: room.maxGames,
++      setResult: JSON.parse(JSON.stringify(room.setResult)),
++      connected: target.connected,
++      disconnectedAt: target.disconnectedAt,   // timeout disconnect yang sedang berjalan dilanjutkan, bukan diulang
++      socketId: target.socketId,
++      at: now,
++    });
++  } else {
++    removals.set(targetId, { code, reason: 'KICKED', at: now });   // pesan jelas bila target sedang offline lalu kembali
++  }
++  return { ok: true, room, mode, targetId };
++}
++
++const getRestriction = (userId) => restrictions.get(userId) || null;
++const clearRestriction = (userId) => restrictions.delete(userId);
++
++/** Snapshot yang dikirim ke klien yang dibatasi (refresh/reconnect): selalu menampilkan Result. */
++function restrictedState(userId) {
++  const r = restrictions.get(userId);
++  if (!r) return null;
++  return {
++    code: r.code, view: 'result', restricted: true, status: 'done', hostId: null, maxGames: r.maxGames,
++    players: [], setScores: r.setResult.setScores, gameHistory: r.setResult.gameHistory, game: null, setResult: r.setResult,
++  };
++}
++
++function markRestrictedDisconnected(userId, socketId = null, now = Date.now()) {
++  const r = restrictions.get(userId);
++  if (!r || !r.connected) return false;
++  if (socketId && r.socketId && r.socketId !== socketId) return false;   // socket lama yang telat putus
++  r.connected = false;
++  r.disconnectedAt = now;
++  return true;
++}
++
++/** Pembatasan berakhir dengan timeout disconnect yang sama seperti pemain biasa. */
++function _expireRestriction(userId, now) {
++  const r = restrictions.get(userId);
++  if (!r || r.connected || r.disconnectedAt == null || now - r.disconnectedAt <= RECONNECT_WINDOW_MS) return null;
++  restrictions.delete(userId);
++  removals.set(userId, { code: r.code, reason: 'EXPIRED', at: now });
++  return { type: 'restriction_expired', code: r.code, playerId: userId };
++}
++
+ function markDisconnected(code, playerId, socketId = null, now = Date.now()) {
+   const room = rooms.get(code);
+   if (!room) return false;
+@@ -370,6 +450,10 @@ function sweepExpired(now = Date.now()) {
+     }
+     events.push(..._expireRoom(room, now));
+   }
++  for (const userId of [...restrictions.keys()]) {
++    const ev = _expireRestriction(userId, now);
++    if (ev) events.push(ev);
++  }
+   for (const [id, r] of removals) if (now - r.at > REMOVAL_MEMORY_MS) removals.delete(id);
+   return events;
+ }
+@@ -380,6 +464,16 @@ function sweepExpired(now = Date.now()) {
+  * socket baru ke keanggotaan yang sudah ada.
+  */
+ function resumeSession(userId, socketId, now = Date.now(), hintCode = null) {
++  // Pemain yang di-Kick dari Result: pembatasan tetap berlaku setelah refresh/reconnect selama belum timeout.
++  _expireRestriction(userId, now);
++  const restriction = restrictions.get(userId);
++  if (restriction) {
++    const wasDisconnected = !restriction.connected;
++    restriction.connected = true;
++    restriction.disconnectedAt = null;
++    restriction.socketId = socketId;
++    return { ok: true, restricted: true, state: restrictedState(userId), wasDisconnected, events: [] };
++  }
+   const room = findRoomByPlayer(userId, hintCode);
+   if (!room) {
+     const rem = removals.get(userId);
+@@ -444,6 +538,6 @@ function generateCode() {
+ 
+ module.exports = {
+   createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip,
+-  leaveRoom, returnToRoom, restoreView, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
++  leaveRoom, returnToRoom, restoreView, kickPlayer, getRestriction, clearRestriction, restrictedState, markRestrictedDisconnected, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
+   restartTurnClock, publicState, RECONNECT_WINDOW_MS,
+ };
+diff --git a/backend/src/socket/socketHandler.js b/backend/src/socket/socketHandler.js
+index e4d58d9..52f5158 100644
+--- a/backend/src/socket/socketHandler.js
++++ b/backend/src/socket/socketHandler.js
+@@ -76,6 +76,13 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     socket.on('leave_room', ({ roomCode } = {}) => {
+       const code = String(roomCode || '').toUpperCase();
+       debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
++      // Pemain yang di-Kick dari Result: kembali ke Homepage mengakhiri pembatasan.
++      const restriction = rm.getRestriction(userId);
++      if (restriction) {
++        rm.clearRestriction(userId);
++        debugLog('KICK_RESTRICTION_CLEARED', { userId, roomCode: restriction.code, how: 'leave_room' });
++        return socket.emit('room_left', { roomCode: restriction.code, roomDeleted: false });
++      }
+       const result = rm.leaveRoom(code, userId);
+       if (!result.ok) {
+         debugLog('LEAVE_ROOM_REJECTED', { userId, roomCode: code, reason: result.error });
+@@ -106,6 +113,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     socket.on('return_to_room', ({ roomCode } = {}) => {
+       const code = String(roomCode || '').toUpperCase();
+       debugLog('RETURN_TO_ROOM_REQUEST', { userId, roomCode: code });
++      if (rm.getRestriction(userId)) {   // di-Kick dari Result: tidak boleh kembali ke Room sebelum ke Homepage
++        debugLog('RETURN_TO_ROOM_REJECTED', { userId, roomCode: code, reason: 'KICKED_FROM_ROOM' });
++        return socket.emit('return_room_error', { code: 'KICKED_FROM_ROOM' });
++      }
+       if (!socket.rooms.has(code)) {
+         socket.emit('return_room_error', { code: 'NOT_IN_ROOM' });
+         return socket.emit('error', { code: 'NOT_IN_ROOM' });
+@@ -127,6 +138,29 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+       socket.to(code).emit('room_updated', rm.publicState(code, null));
+     });
+ 
++    // ── kick_player ────────────────────────────────────────────────────────
++    // Hanya Host, hanya saat game tidak berlangsung. Semua validasi di roomManager.kickPlayer.
++    socket.on('kick_player', ({ roomCode, targetId } = {}) => {
++      const code = String(roomCode || '').toUpperCase();
++      const target = String(targetId || '');
++      if (!socket.rooms.has(code)) return socket.emit('kick_error', { code: 'NOT_IN_ROOM' });
++      const result = rm.kickPlayer(code, userId, target);
++      if (!result.ok) {
++        debugLog('KICK_REJECTED', { roomCode: code, hostId: userId, targetId: target, reason: result.error });
++        return socket.emit('kick_error', { code: result.error });
++      }
++
++      // Hanya socket milik target yang dilepas dari room; pemain lain tidak terpengaruh.
++      for (const [, other] of io.sockets.sockets) {
++        if (other.user?.id !== target || !other.rooms.has(code)) continue;
++        other.leave(code);
++        other.emit(result.mode === 'result' ? 'kicked_from_result' : 'kicked', { roomCode: code });
++      }
++      debugLog('PLAYER_KICKED', { roomCode: code, hostId: userId, targetId: target, mode: result.mode, remaining: result.room.players.length });
++      io.to(code).emit('room_updated', rm.publicState(code, null));
++      socket.emit('kick_done', { targetId: target, mode: result.mode });
++    });
++
+     // ── start_game ─────────────────────────────────────────────────────────
+     socket.on('start_game', ({ roomCode }) => {
+       if (!requireInRoom(socket, roomCode)) return;
+@@ -196,6 +230,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     // Hanya socket yang masih menjadi socket aktif pemain yang dihitung sebagai terputus.
+     socket.on('disconnecting', (reason) => {
+       debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms].filter(r => r !== socket.id) });
++      if (rm.markRestrictedDisconnected(userId, socket.id)) debugLog('RESTRICTED_PLAYER_DISCONNECTED', { userId, socketId: socket.id });
+       for (const roomCode of socket.rooms) {
+         if (roomCode === socket.id) continue;
+         const changed = rm.markDisconnected(roomCode, userId, socket.id);
+@@ -222,6 +257,12 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     const r = rm.resumeSession(userId, socket.id, Date.now(), hintCode);
+     if (r.events?.length) broadcastRoomEvents(r.events);
+ 
++    if (r.ok && r.restricted) {   // di-Kick dari Result: tetap di Result, tanpa bergabung ke socket-room mana pun
++      socket.emit('session_restored', r.state);
++      debugLog('SESSION_RESTORED_RESTRICTED', { userId, roomCode: r.state.code, socketId: socket.id, wasDisconnected: r.wasDisconnected });
++      return;
++    }
++
+     if (!r.ok) {
+       if (r.error !== 'NO_ROOM') debugLog('SESSION_RESUME_REJECTED', { userId, socketId: socket.id, reason: r.error });
+       socket.emit('session_none', { reason: r.error });
+@@ -262,7 +303,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     for (const e of events) {
+       debugLog(`ROOM_${e.type.toUpperCase()}`, e);
+       if (e.type === 'room_deleted' || e.type === 'room_abandoned') clearTimer(e.code);
+-      else touched.add(e.code);
++      else if (e.type !== 'restriction_expired') touched.add(e.code);
+     }
+     for (const code of touched) {
+       const room = rm.getRoom(code);
+diff --git a/backend/tests/kick.sim.js b/backend/tests/kick.sim.js
+new file mode 100644
+index 0000000..d43f566
+--- /dev/null
++++ b/backend/tests/kick.sim.js
+@@ -0,0 +1,309 @@
++'use strict';
++/**
++ * Simulasi Host Kick (Socket.IO tiruan, server ASLI: socketHandler.js + roomManager.js + engine.js).
++ *   npm run test:kick      (dari folder backend)
++ *
++ * Aturan yang diuji:
++ *   - Room (waiting): Host boleh Kick, pemain boleh bergabung lagi (bukan ban).
++ *   - Game (playing): Kick ditolak.
++ *   - Result: pemain yang di-Kick tetap melihat hasil, tidak boleh kembali ke Room sebelum ke Homepage;
++ *     pembatasan bertahan saat refresh/reconnect dan berakhir saat kembali ke Homepage atau timeout disconnect.
++ *   - Validasi hak akses di backend (event Socket.IO langsung dari non-host / non-anggota ditolak).
++ */
++const { assert, rm, setup, newRoom, uid, player, advance, playSetToEnd, runTests } = require('./helpers/sim');
++
++const tests = [];
++const test = (name, fn) => tests.push({ name, fn });
++
++const finishedRoom = async () => {
++  const env = setup();
++  const room = newRoom(env.io, 4, { start: true });
++  await playSetToEnd(room.clients, room.users, room.code);
++  return { ...env, ...room };
++};
++const waitingRoom = () => { const env = setup(); return { ...env, ...newRoom(env.io, 4) }; };
++const members = (code) => rm.getRoom(code).players.map(p => p.id);
++const noDisturbance = (cs) => cs.every(c => !c.all('player_disconnected').length && !c.all('session_replaced').length && !c.all('room_left').length);
++
++// ── Room (belum mulai) ───────────────────────────────────────────────────────
++
++test('Room: Host mengeluarkan pemain → dihapus dari room, target menerima "kicked", pemain lain mendapat update tanpa gangguan', () => {
++  const { users, clients, code } = waitingRoom();
++  clients.forEach(c => c.clear());
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[2] });
++
++  assert.equal(clients[0].last('kick_done').mode, 'room');
++  assert.deepEqual(members(code), [users[0], users[1], users[3]]);
++  assert.equal(clients[2].last('kicked').roomCode, code);
++  assert.ok(!clients[2].socket.rooms.has(code), 'socket target harus keluar dari room');
++  for (const i of [0, 1, 3]) {
++    const upd = clients[i].last('room_updated');
++    assert.deepEqual(upd.players.map(p => p.id), [users[0], users[1], users[3]]);
++  }
++  assert.equal(clients[2].all('room_updated').length, 0, 'target tidak boleh menerima update room lagi');
++  assert.ok(noDisturbance([clients[0], clients[1], clients[3]]));
++  assert.equal(rm.getRoom(code).hostId, users[0]);
++  assert.equal(rm.getRestriction(users[2]), null, 'kick di Room bukan pembatasan Result');
++});
++
++test('Room: pemain yang di-Kick boleh bergabung kembali (bukan permanent ban)', () => {
++  const { users, clients, code } = waitingRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  assert.equal(members(code).length, 3);
++  clients[3].emit('join_room', { roomCode: code });
++  assert.deepEqual(clients[3].all('error'), []);
++  assert.ok(members(code).includes(users[3]));
++  assert.ok(clients[3].socket.rooms.has(code));
++  clients[0].emit('start_game', { roomCode: code });          // room kembali penuh dan bisa dimulai
++  assert.equal(rm.getRoom(code).status, 'playing');
++});
++
++test('Room: pemain yang di-Kick lalu refresh → mendapat alasan KICKED (bukan state room lama)', () => {
++  const { io, users, clients, code } = waitingRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[1] });
++  clients[1].disconnect();
++  const fresh = io.connect(users[1]); fresh.emit('resume_session');
++  assert.equal(fresh.last('session_none').reason, 'KICKED');
++});
++
++test('Room: setelah di-Kick lalu bergabung lagi dan keluar sendiri, refresh tidak menampilkan alasan KICKED yang basi', () => {
++  const { io, users, clients, code } = waitingRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[1] });
++  clients[1].emit('join_room', { roomCode: code });            // bergabung lagi tanpa refresh di antaranya
++  assert.ok(members(code).includes(users[1]));
++  clients[1].emit('leave_room', { roomCode: code });
++  clients[1].disconnect();
++  const again = io.connect(users[1]); again.emit('resume_session');
++  assert.notEqual(again.last('session_none')?.reason, 'KICKED', 'alasan KICKED tidak boleh basi setelah bergabung lagi');
++});
++
++test('Room: kick pemain yang sedang terputus tetap berhasil dan tidak mengganggu pemain lain', () => {
++  const { users, clients, code } = waitingRoom();
++  clients[2].disconnect();
++  clients.forEach(c => c.clear());
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[2] });
++  assert.deepEqual(members(code), [users[0], users[1], users[3]]);
++  assert.ok(noDisturbance([clients[0], clients[1], clients[3]]));
++});
++
++// ── Hak akses & status (backend) ─────────────────────────────────────────────
++
++test('hanya Host: non-host yang mengirim kick_player langsung ditolak, room tidak berubah', () => {
++  const { users, clients, code } = waitingRoom();
++  clients[1].emit('kick_player', { roomCode: code, targetId: users[2] });
++  assert.equal(clients[1].last('kick_error').code, 'NOT_HOST');
++  assert.equal(members(code).length, 4);
++  assert.equal(clients[2].all('kicked').length, 0);
++});
++
++test('non-anggota room yang memalsukan event kick_player ditolak', () => {
++  const { io, users, code } = waitingRoom();
++  const outsider = io.connect(uid('x_'));
++  outsider.emit('kick_player', { roomCode: code, targetId: users[1] });
++  assert.equal(outsider.last('kick_error').code, 'NOT_IN_ROOM');
++  assert.equal(members(code).length, 4);
++});
++
++test('Host tidak bisa mengeluarkan diri sendiri atau pemain yang tidak ada di room', () => {
++  const { users, clients, code } = waitingRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[0] });
++  assert.equal(clients[0].last('kick_error').code, 'CANNOT_KICK_SELF');
++  clients[0].emit('kick_player', { roomCode: code, targetId: 'bukan-anggota' });
++  assert.equal(clients[0].last('kick_error').code, 'TARGET_NOT_IN_ROOM');
++  clients[0].emit('kick_player', { roomCode: code });
++  assert.equal(members(code).length, 4);
++});
++
++test('Game berlangsung: Host tidak bisa Kick; game dan semua pemain tidak berubah', () => {
++  const env = setup(); const { users, clients, code } = newRoom(env.io, 4, { start: true });
++  const before = JSON.stringify(rm.getRoom(code).currentGame);
++  clients.forEach(c => c.clear());
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[1] });
++  assert.equal(clients[0].last('kick_error').code, 'GAME_IN_PROGRESS');
++  assert.equal(members(code).length, 4);
++  assert.equal(JSON.stringify(rm.getRoom(code).currentGame), before);
++  assert.equal(clients[1].all('kicked').length + clients[1].all('kicked_from_result').length, 0);
++  assert.equal(rm.getRestriction(users[1]), null);
++});
++
++test('Homepage: pemain yang belum di Room tidak bisa Kick maupun di-Kick (tidak ada room)', () => {
++  const { io } = setup(); const lone = io.connect(uid('h_'));
++  lone.emit('kick_player', { roomCode: 'ZZZZZZ', targetId: 'siapa' });
++  assert.equal(lone.last('kick_error').code, 'NOT_IN_ROOM');
++});
++
++// ── Result ───────────────────────────────────────────────────────────────────
++
++test('Result: pemain yang di-Kick dikeluarkan dari kursi room tetapi pembatasan + hasil set disimpan; "kicked_from_result" dikirim', async () => {
++  const { users, clients, code } = await finishedRoom();
++  clients.forEach(c => c.clear());
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  assert.equal(clients[0].last('kick_done').mode, 'result');
++  assert.deepEqual(members(code), [users[0], users[1], users[2]]);
++  assert.equal(clients[3].last('kicked_from_result').roomCode, code);
++  assert.equal(clients[3].all('kicked').length, 0);
++  assert.ok(!clients[3].socket.rooms.has(code));
++  const r = rm.getRestriction(users[3]);
++  assert.ok(r && r.code === code);
++  assert.equal(r.setResult.rankings.length, 4, 'hasil set utuh (4 pemain) tetap tersimpan untuk yang di-Kick');
++  assert.equal(r.setResult.gameHistory.length, 4);
++  for (const i of [0, 1, 2]) assert.equal(clients[i].last('room_updated').players.length, 3);
++  assert.ok(noDisturbance([clients[0], clients[1], clients[2]]));
++  assert.equal(rm.getRoom(code).setResult.rankings.length, 4, 'setResult room untuk pemain lain tidak dihapus');
++});
++
++test('Result: Back to Room oleh pemain yang di-Kick ditolak berulang kali (KICKED_FROM_ROOM) tanpa efek ke room dan tanpa event error generik', async () => {
++  const { users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  const snapshot = JSON.stringify(rm.getRoom(code).players);
++  clients[3].clear();
++  for (let i = 0; i < 3; i++) clients[3].emit('return_to_room', { roomCode: code });
++  assert.deepEqual(clients[3].all('return_room_error'), Array(3).fill({ code: 'KICKED_FROM_ROOM' }));
++  assert.equal(clients[3].all('room_returned').length, 0);
++  assert.equal(clients[3].all('error').length, 0);
++  assert.equal(JSON.stringify(rm.getRoom(code).players), snapshot);
++  assert.equal(rm.getRoom(code).status, 'done');
++});
++
++test('Result: pemain yang di-Kick tidak bisa menembus lewat join_room / create_room / start_game / play_cards langsung', async () => {
++  const { users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  clients[3].clear();
++  clients[3].emit('join_room', { roomCode: code });
++  assert.equal(clients[3].last('error').code, 'KICKED_FROM_ROOM');
++  clients[3].emit('create_room', { maxGames: 4 });
++  assert.equal(clients[3].last('error').code, 'KICKED_FROM_ROOM');
++  clients[3].emit('start_game', { roomCode: code });
++  clients[3].emit('play_cards', { roomCode: code, cardIds: ['3D'] });
++  clients[3].emit('kick_player', { roomCode: code, targetId: users[1] });
++  assert.equal(clients[3].last('kick_error').code, 'NOT_IN_ROOM');
++  assert.equal(members(code).length, 3);
++  assert.equal(rm.getRoom(code).status, 'done');
++});
++
++test('Result: pemain lain tidak terpengaruh: Back to Room tetap berfungsi; kursi kosong bisa diisi pemain baru; set baru bisa dimulai', async () => {
++  const { io, users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  for (const i of [0, 1, 2]) clients[i].emit('return_to_room', { roomCode: code });
++  assert.ok([0, 1, 2].every(i => clients[i].last('room_returned')));
++  assert.equal(rm.getRoom(code).status, 'waiting');
++  const fresh = io.connect(uid('n_')); fresh.emit('join_room', { roomCode: code });
++  assert.equal(members(code).length, 4);
++  fresh.emit('return_to_room', { roomCode: code });
++  clients[0].emit('start_game', { roomCode: code });
++  assert.equal(rm.getRoom(code).status, 'playing');
++  assert.ok(rm.getRestriction(users[3]), 'pembatasan tidak hilang hanya karena set baru dimulai');
++  assert.equal(rm.getRestriction(users[3]).setResult.rankings.length, 4, 'hasil untuk pemain yang di-Kick tidak ikut terhapus');
++});
++
++test('Result: refresh → pembatasan tetap berlaku, kembali ke Result dengan hasil lengkap (berulang kali)', async () => {
++  const { io, users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  clients[3].disconnect();
++  for (let i = 0; i < 3; i++) {
++    const tab = io.connect(users[3]); tab.emit('resume_session');
++    const st = tab.last('session_restored');
++    assert.ok(st, 'harus dipulihkan, bukan session_none');
++    assert.equal(st.view, 'result'); assert.equal(st.restricted, true);
++    assert.equal(st.setResult.rankings.length, 4); assert.equal(st.setResult.gameHistory.length, 4);
++    assert.equal(st.code, code);
++    tab.emit('return_to_room', { roomCode: code });
++    assert.equal(tab.last('return_room_error').code, 'KICKED_FROM_ROOM');
++    assert.ok(!tab.socket.rooms.has(code));
++    tab.disconnect();
++  }
++  assert.equal(members(code).length, 3);
++});
++
++test('Result: pemain yang di-Kick tetap melihat hasil walau room sudah berganti set (setResult room sudah dibersihkan)', async () => {
++  const { io, users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  rm.getRoom(code).setResult = null;                     // seperti saat set baru dimulai
++  clients[3].disconnect();
++  const tab = io.connect(users[3]); tab.emit('resume_session');
++  assert.equal(tab.last('session_restored').setResult.rankings.length, 4);
++});
++
++test('Result: disconnect lalu reconnect sebelum timeout → pembatasan tetap berlaku, kembali ke Result', async () => {
++  const { io, handle, users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  clients[3].disconnect();
++  advance(rm.RECONNECT_WINDOW_MS - 5_000); handle.sweep();
++  assert.ok(rm.getRestriction(users[3]), 'belum boleh kedaluwarsa');
++  const tab = io.connect(users[3]); tab.emit('resume_session');
++  assert.equal(tab.last('session_restored').restricted, true);
++  tab.emit('return_to_room', { roomCode: code });
++  assert.equal(tab.last('return_room_error').code, 'KICKED_FROM_ROOM');
++});
++
++test('Result: disconnect melewati timeout yang ada → pembatasan berakhir; pemain kembali ke Homepage dan boleh bergabung lagi', async () => {
++  const { io, handle, users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  clients[3].disconnect();
++  advance(rm.RECONNECT_WINDOW_MS + 1_000); handle.sweep();
++  assert.equal(rm.getRestriction(users[3]), null);
++  const tab = io.connect(users[3]); tab.emit('resume_session');
++  assert.equal(tab.last('session_none').reason, 'EXPIRED');
++  assert.equal(tab.all('session_restored').length, 0);
++  tab.emit('join_room', { roomCode: code });
++  assert.deepEqual(tab.all('error'), []);
++  assert.ok(members(code).includes(users[3]));
++});
++
++test('Result: timeout dihitung tepat saat resume walau sweeper belum berjalan', async () => {
++  const { io, users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  clients[3].disconnect();
++  advance(rm.RECONNECT_WINDOW_MS + 1_000);
++  const tab = io.connect(users[3]); tab.emit('resume_session');
++  assert.equal(tab.last('session_none').reason, 'EXPIRED');
++});
++
++test('Result: Kick pemain yang sudah terputus melanjutkan timeout yang berjalan (bukan mengulang dari nol)', async () => {
++  const { handle, users, clients, code } = await finishedRoom();
++  clients[3].disconnect();
++  advance(50_000);
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  advance(11_000); handle.sweep();
++  assert.equal(rm.getRestriction(users[3]), null, 'total 61 dtk sejak terputus → berakhir');
++});
++
++test('Result: Back to Menu Utama (leave_room) mengakhiri pembatasan; boleh bergabung lagi ke room yang sama', async () => {
++  const { users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  clients[3].clear();
++  clients[3].emit('leave_room', { roomCode: code });
++  assert.equal(clients[3].last('room_left').roomCode, code);
++  assert.equal(rm.getRestriction(users[3]), null);
++  assert.equal(clients[3].all('error').length, 0);
++  assert.equal(members(code).length, 3, 'leave_room tidak boleh mengubah anggota room lain');
++  clients[3].emit('join_room', { roomCode: code });
++  assert.deepEqual(clients[3].all('error'), []);
++  assert.ok(members(code).includes(users[3]));
++  assert.ok(clients[3].socket.rooms.has(code));
++});
++
++test('campuran: Host sudah di Room, target masih di Result → mode result; target sudah di Room → mode room', async () => {
++  const { users, clients, code } = await finishedRoom();
++  clients[0].emit('return_to_room', { roomCode: code });
++  clients[1].emit('return_to_room', { roomCode: code });          // di Room: host + users[1]; users[2], users[3] masih di Result
++  assert.equal(rm.getRoom(code).status, 'waiting');
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  assert.equal(clients[0].last('kick_done').mode, 'result');
++  assert.ok(rm.getRestriction(users[3]));
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[1] });
++  assert.equal(clients[0].last('kick_done').mode, 'room');
++  assert.equal(rm.getRestriction(users[1]), null);
++  assert.equal(clients[1].last('kicked').roomCode, code);
++  assert.deepEqual(members(code), [users[0], users[2]]);
++});
++
++test('pembatasan tidak bocor ke pemain lain atau room lain', async () => {
++  const { users, clients, code } = await finishedRoom();
++  clients[0].emit('kick_player', { roomCode: code, targetId: users[3] });
++  for (const i of [0, 1, 2]) assert.equal(rm.getRestriction(users[i]), null);
++  const other = setup(); const r2 = newRoom(other.io, 2);
++  assert.equal(rm.getRestriction(r2.users[0]), null);
++});
++
++runTests(tests);
+diff --git a/frontend/src/components/Modal.jsx b/frontend/src/components/Modal.jsx
+new file mode 100644
+index 0000000..254345b
+--- /dev/null
++++ b/frontend/src/components/Modal.jsx
+@@ -0,0 +1,61 @@
++import React, { useEffect, useRef } from 'react'
++
++const C = { surface:'#16213e', accent:'#e94560', text:'#eee', muted:'#aaa', border:'#1a4a7a' }
++
++/**
++ * Modal blocking: overlay menutup seluruh halaman sehingga UI di belakangnya tidak bisa diklik.
++ * Klik di luar kotak tidak menutupnya, Tab dikunci di dalam modal, dan Escape hanya menutup bila `onEscape` diberikan
++ * (modal wajib seperti "Akses Room Dibatasi" tidak memberi `onEscape`, jadi harus ditutup lewat tombolnya).
++ * actions: [{ label, onClick, primary?, autoFocus? }]
++ */
++export default function Modal({ title, children, actions = [], onEscape, testId }) {
++  const boxRef = useRef(null)
++
++  useEffect(() => {
++    const previous = document.activeElement
++    const first = boxRef.current?.querySelector('[data-autofocus]') || boxRef.current?.querySelector('button')
++    first?.focus()
++    return () => { if (previous && previous.focus) previous.focus() }
++  }, [])
++
++  function onKeyDown(e) {
++    if (e.key === 'Escape') { if (onEscape) { e.stopPropagation(); onEscape() } return }
++    if (e.key !== 'Tab') return
++    const buttons = [...(boxRef.current?.querySelectorAll('button') || [])]
++    if (!buttons.length) return
++    const firstBtn = buttons[0], lastBtn = buttons[buttons.length - 1]
++    if (e.shiftKey && document.activeElement === firstBtn) { e.preventDefault(); lastBtn.focus() }
++    else if (!e.shiftKey && document.activeElement === lastBtn) { e.preventDefault(); firstBtn.focus() }
++  }
++
++  return (
++    <div
++      data-testid={testId}
++      onKeyDown={onKeyDown}
++      style={{ position:'fixed', inset:0, zIndex:900, background:'rgba(0,0,0,0.65)', display:'flex', alignItems:'center', justifyContent:'center', padding:'1rem' }}
++    >
++      <div
++        ref={boxRef}
++        role="dialog" aria-modal="true" aria-labelledby="modal-title"
++        style={{ width:'100%', maxWidth:340, background:C.surface, border:`1px solid ${C.border}`, borderRadius:14, padding:'1.25rem', boxShadow:'0 10px 40px rgba(0,0,0,0.5)' }}
++      >
++        <div id="modal-title" style={{ fontSize:17, fontWeight:700, color:C.text, marginBottom:8 }}>{title}</div>
++        <div style={{ fontSize:14, color:C.muted, lineHeight:1.5, marginBottom:16 }}>{children}</div>
++        <div style={{ display:'flex', gap:8, justifyContent:'flex-end' }}>
++          {actions.map(a => (
++            <button
++              key={a.label}
++              onClick={a.onClick}
++              data-autofocus={a.autoFocus ? '' : undefined}
++              style={{
++                padding:'9px 16px', borderRadius:8, fontSize:14, fontWeight:600, cursor:'pointer',
++                background: a.primary ? C.accent : 'transparent', color: a.primary ? '#fff' : C.text,
++                border: a.primary ? 'none' : `1px solid ${C.border}`,
++              }}
++            >{a.label}</button>
++          ))}
++        </div>
++      </div>
++    </div>
++  )
++}
+diff --git a/frontend/src/hooks/useSocket.js b/frontend/src/hooks/useSocket.js
+index 80cb426..7071e02 100644
+--- a/frontend/src/hooks/useSocket.js
++++ b/frontend/src/hooks/useSocket.js
+@@ -6,6 +6,7 @@ import {
+   SYNC_FAIL_AFTER_MS, RESUME_TIMEOUT_MS,
+   routeForRestoredState, messageForSessionNone,
+ } from '../utils/session'
++import { messageForKickError } from '../utils/kick'
+ 
+ const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
+ 
+@@ -158,7 +159,7 @@ export function useSocket() {
+       const hadRoom = !!(st.roomCode || st.roomInfo)
+       debugLog('SESSION_NONE', { reason, hadRoom })
+       if (hadRoom) st.clearRoomState()
+-      if (hadRoom || reason === 'EXPIRED' || reason === 'ROOM_CLOSED') {
++      if (hadRoom || reason === 'EXPIRED' || reason === 'ROOM_CLOSED' || reason === 'KICKED') {
+         st.setNotice(messageForSessionNone(reason))
+       }
+       // Jangan biarkan pemain tertinggal di halaman yang butuh room.
+@@ -238,10 +239,38 @@ export function useSocket() {
+ 
+     s.on('return_room_error', ({ code }) => {
+       debugLog('RETURN_TO_ROOM_FAILED', { code })
++      if (code === 'KICKED_FROM_ROOM') {
++        // Server menolak karena pemain di-Kick: tampilkan modal (respons atas tindakan pemain), bukan pesan error.
++        const st = useGameStore.getState()
++        st.setRestricted(true)
++        st.openRestrictedModal()
++        st.pushEvent({ type: 'return_room_error', code })
++        return
++      }
+       setError(`Gagal kembali ke room: ${code}`)
+       useGameStore.getState().pushEvent({ type: 'return_room_error', code })
+     })
+ 
++    // ── Host Kick ──────────────────────────────────────────────────
++    // Di-Kick saat di Room: keluar dari room dan kembali ke Menu Utama (boleh bergabung lagi).
++    s.on('kicked', () => {
++      debugLog('KICKED_FROM_ROOM')
++      const st = useGameStore.getState()
++      st.clearRoomState()
++      st.setNotice(messageForSessionNone('KICKED'))
++      navigate('/lobby', { replace: true })
++    })
++    // Di-Kick saat di Result: tetap di Result (tanpa notifikasi otomatis); hanya menandai pembatasan.
++    s.on('kicked_from_result', () => {
++      debugLog('KICKED_FROM_RESULT')
++      useGameStore.getState().setRestricted(true)
++    })
++    s.on('kick_error', ({ code }) => {
++      debugLog('KICK_FAILED', { code })
++      setError(messageForKickError(code))
++      setTimeout(() => useGameStore.getState().clearError(), 3000)
++    })
++
+     s.on('leave_room_error', ({ code }) => {
+       debugLog('LEAVE_ROOM_FAILED', { code })
+       setError(`Gagal keluar dari room: ${code}`)
+diff --git a/frontend/src/pages/LobbyPage.jsx b/frontend/src/pages/LobbyPage.jsx
+index c183aef..2f814e8 100644
+--- a/frontend/src/pages/LobbyPage.jsx
++++ b/frontend/src/pages/LobbyPage.jsx
+@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react'
+ import { useNavigate } from 'react-router-dom'
+ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
++import Modal from '../components/Modal'
++import { canShowKick, kickConfirmText } from '../utils/kick'
+ 
+ const C = { bg:'#1a1a2e', card:'#16213e', accent:'#e94560', muted:'#888', border:'#1a4a7a', text:'#eee', green:'#2ecc71', yellow:'#f39c12' }
+ 
+@@ -27,7 +29,8 @@ const s = {
+ 
+ export default function LobbyPage() {
+   const navigate  = useNavigate()
+-  const { user, token, roomCode, roomInfo, logout, events, setResult } = useGameStore()
++  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted } = useGameStore()
++  const [kickTarget, setKickTarget] = useState(null)   // id pemain yang menunggu konfirmasi Kick
+   const [joinInput, setJoinInput] = useState('')
+   const [maxGames, setMaxGames]   = useState(4)
+   const [localErr, setLocalErr]   = useState('')
+@@ -50,10 +53,11 @@ export default function LobbyPage() {
+   // (mis. refresh): dipulangkan ke /result dengan hasil dari server.
+   const me = players.find(p => p.id === user?.id)
+   const mustBeOnScoreboard = !!(myRoom && me && me.inRoom === false && (setResult || myRoom.setResult))
++    || !!(restricted && setResult)   // di-Kick dari Result: tempatnya di Result sampai kembali ke Homepage
+   useEffect(() => {
+     if (!mustBeOnScoreboard) return
+-    const result = setResult || myRoom.setResult
+-    console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom.code })
++    const result = setResult || myRoom?.setResult
++    console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom?.code })
+     if (!setResult) useGameStore.getState().setSetResult(result)
+     navigate('/result', { replace: true })
+   }, [mustBeOnScoreboard])
+@@ -187,6 +191,12 @@ export default function LobbyPage() {
+                   <span style={{ display:'flex', gap:8, alignItems:'center' }}>
+                     {p && p.inRoom === false && <span style={{ fontSize:11, color:C.muted }}>belum kembali</span>}
+                     {p?.id === myRoom.hostId && <span style={{ fontSize:11, color:C.yellow }}>Host</span>}
++                    {p && canShowKick({ myId: user?.id, hostId: myRoom.hostId, targetId: p.id, players, status: myRoom.status }) && (
++                      <button
++                        onClick={() => setKickTarget(p.id)}
++                        style={{ padding:'2px 8px', fontSize:11, fontWeight:600, borderRadius:6, background:'transparent', color:C.accent, border:`1px solid ${C.accent}`, cursor:'pointer' }}
++                      >Kick</button>
++                    )}
+                   </span>
+                 </div>
+               )
+@@ -220,6 +230,24 @@ export default function LobbyPage() {
+         </div>
+       )}
+ 
++      {kickTarget && (
++        <Modal
++          testId="kick-confirm"
++          title="Kick pemain?"
++          onEscape={() => setKickTarget(null)}
++          actions={[
++            { label: 'Batal', onClick: () => setKickTarget(null) },
++            { label: 'Kick', primary: true, onClick: () => {
++                const target = kickTarget
++                setKickTarget(null)
++                if (!emitSocket('kick_player', { roomCode, targetId: target })) setLocalErr('Koneksi ke server terputus. Tunggu tersambung sebelum mengeluarkan pemain.')
++              } },
++          ]}
++        >
++          {kickConfirmText(kickTarget.slice(0, 8), players.find(p => p.id === kickTarget)?.inRoom === false)}
++        </Modal>
++      )}
++
+       {/* Rules quick reference */}
+       <div style={{ ...s.card, marginTop:'auto' }}>
+         <div style={{ fontSize:13, color:C.muted, lineHeight:1.8 }}>
+diff --git a/frontend/src/pages/ResultPage.jsx b/frontend/src/pages/ResultPage.jsx
+index 0399190..8d9dfe2 100644
+--- a/frontend/src/pages/ResultPage.jsx
++++ b/frontend/src/pages/ResultPage.jsx
+@@ -1,6 +1,8 @@
+ import React from 'react'
+ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
++import Modal from '../components/Modal'
++import { canShowKick, kickConfirmText, backToRoomDecision, RESTRICTED_MODAL } from '../utils/kick'
+ 
+ const C = { bg:'#1a1a2e', surface:'#16213e', accent:'#e94560', text:'#eee', muted:'#888', gold:'#f1c40f', silver:'#bdc3c7', bronze:'#e67e22', green:'#2ecc71', red:'#e74c3c' }
+ const MEDAL = ['🥇','🥈','🥉','💀']
+@@ -8,7 +10,8 @@ const PRIZE = ['+5k','+3k','-3k','-5k']
+ const PRIZE_COLOR = [C.green, C.green, C.red, C.red]
+ 
+ export default function ResultPage() {
+-  const { setResult, user, roomInfo, roomCode, connected, setError, events, error } = useGameStore()
++  const { setResult, user, roomInfo, roomCode, connected, setError, events, error, restricted, restrictedModalOpen, openRestrictedModal, closeRestrictedModal } = useGameStore()
++  const [kickTarget, setKickTarget] = React.useState(null)   // id pemain yang menunggu konfirmasi Kick
+   // 'room' = menunggu jawaban Back to Room, 'menu' = menunggu jawaban Back to Menu Utama
+   const [busy, setBusy] = React.useState(null)
+ 
+@@ -25,13 +28,19 @@ export default function ResultPage() {
+   // Dua aksi berbeda: Back to Room → return_to_room (tetap anggota, room direset),
+   // Back to Menu Utama → leave_room (keluar dari room sepenuhnya).
+   function sendRoomAction(kind, event, logName, failMsg) {
+-    if (busy) return
+     const code = roomCode || roomInfo?.code
+-    if (!code) {
++    // Back to Room oleh pemain yang di-Kick: modal "Akses Room Dibatasi" (tanpa menghubungi server);
++    // tiap tekanan menampilkannya lagi, dan tidak pernah muncul otomatis.
++    const decision = kind === 'room'
++      ? backToRoomDecision({ busy, restricted, code, connected })
++      : backToRoomDecision({ busy, restricted: false, code, connected })
++    if (decision === 'busy') return
++    if (decision === 'restricted') { openRestrictedModal(); return }
++    if (decision === 'no_code') {
+       setError('Kode room tidak ditemukan. Coba refresh halaman.')
+       return
+     }
+-    if (!connected) {
++    if (decision === 'offline') {
+       setError('Koneksi ke server terputus. Tunggu tersambung sebelum melanjutkan.')
+       return
+     }
+@@ -45,9 +54,23 @@ export default function ResultPage() {
+   const goRoom = () => sendRoomAction('room', 'return_to_room', 'RETURN_TO_ROOM_CLICKED', 'Gagal mengirim permintaan kembali ke room. Periksa koneksi server.')
+   const goMenu = () => sendRoomAction('menu', 'leave_room', 'LEAVE_ROOM_CLICKED', 'Gagal mengirim permintaan keluar room. Periksa koneksi server.')
+ 
++  // Host Kick: konfirmasi dulu, lalu server memvalidasi (hanya Host, bukan saat game berlangsung).
++  const players = roomInfo?.players || []
++  const showKick = (id) => canShowKick({ myId: user?.id, hostId: roomInfo?.hostId, targetId: id, players, status: roomInfo?.status })
++  const kickPlayerInfo = kickTarget ? players.find(p => p.id === kickTarget) : null
++  function confirmKick() {
++    const code = roomCode || roomInfo?.code
++    const target = kickTarget
++    setKickTarget(null)
++    if (!target || !code) return
++    if (!emitSocket('kick_player', { roomCode: code, targetId: target })) setError('Koneksi ke server terputus. Tunggu tersambung sebelum mengeluarkan pemain.')
++  }
++
+   return (
+-    <div style={{ minHeight:'100dvh', background:C.bg, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'1rem' }}>
+-      <div style={{ width:'100%', maxWidth:400 }}>
++    // Halaman dibagi dua: konten Result yang bisa di-scroll vertikal, dan area tombol navigasi yang selalu terlihat (sticky di bawah).
++    <div style={{ height:'100dvh', background:C.bg, display:'flex', flexDirection:'column' }}>
++      <div data-testid="result-scroll" style={{ flex:1, minHeight:0, overflowY:'auto', WebkitOverflowScrolling:'touch', display:'flex', flexDirection:'column', padding:'1rem' }}>
++      <div style={{ width:'100%', maxWidth:400, margin:'auto' }}>
+ 
+         {error && (
+           <div role="alert" style={{ background:'rgba(233,69,96,0.12)', border:`1px solid ${C.accent}`, color:C.accent, borderRadius:8, padding:'9px 12px', fontSize:13, marginBottom:14 }}>
+@@ -80,6 +103,12 @@ export default function ResultPage() {
+                 <div style={{ textAlign:'right' }}>
+                   <div style={{ fontSize:16, fontWeight:700, color:PRIZE_COLOR[i] }}>{PRIZE[i]}</div>
+                   <div style={{ fontSize:11, color:C.muted }}>Juara {i+1}</div>
++                  {showKick(r.id) && (
++                    <button
++                      onClick={() => setKickTarget(r.id)}
++                      style={{ marginTop:4, padding:'2px 8px', fontSize:11, fontWeight:600, borderRadius:6, background:'transparent', color:C.accent, border:`1px solid ${C.accent}`, cursor:'pointer' }}
++                    >Kick</button>
++                  )}
+                 </div>
+               </div>
+             )
+@@ -100,25 +129,56 @@ export default function ResultPage() {
+           </div>
+         )}
+ 
+-        <button
+-          onClick={goRoom}
+-          disabled={!!busy}
+-          style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:C.accent, color:'#fff', border:'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1, marginBottom:10 }}
+-        >
+-          {busy === 'room' ? 'Kembali ke room…' : 'Back to Room'}
+-        </button>
+-        <button
+-          onClick={goMenu}
+-          disabled={!!busy}
+-          style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:'#0f3460', color:C.text, border:'1px solid #1a4a7a', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }}
+-        >
+-          {busy === 'menu' ? 'Keluar dari room…' : 'Back to Menu Utama'}
+-        </button>
+-        <div style={{ fontSize:11, color:C.muted, textAlign:'center', marginTop:10, lineHeight:1.5 }}>
+-          Back to Room: tetap di room ini dan menunggu pemain lain.<br />
+-          Back to Menu Utama: keluar dari room.
++      </div>
++      </div>
++
++      {/* Area tombol navigasi: tetap terlihat, tidak ikut ter-scroll */}
++      <div data-testid="result-nav" style={{ flexShrink:0, background:C.bg, borderTop:'1px solid #1a4a7a', padding:'0.75rem 1rem calc(0.75rem + env(safe-area-inset-bottom, 0px))' }}>
++        <div style={{ width:'100%', maxWidth:400, margin:'0 auto' }}>
++          <button
++            onClick={goRoom}
++            disabled={!!busy}
++            style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:C.accent, color:'#fff', border:'none', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1, marginBottom:10 }}
++          >
++            {busy === 'room' ? 'Kembali ke room…' : 'Back to Room'}
++          </button>
++          <button
++            onClick={goMenu}
++            disabled={!!busy}
++            style={{ width:'100%', padding:'13px', borderRadius:10, fontSize:15, fontWeight:600, background:'#0f3460', color:C.text, border:'1px solid #1a4a7a', cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1 }}
++          >
++            {busy === 'menu' ? 'Keluar dari room…' : 'Back to Menu Utama'}
++          </button>
++          <div style={{ fontSize:11, color:C.muted, textAlign:'center', marginTop:10, lineHeight:1.5 }}>
++            Back to Room: tetap di room ini dan menunggu pemain lain.<br />
++            Back to Menu Utama: keluar dari room.
++          </div>
+         </div>
+       </div>
++
++      {kickTarget && (
++        <Modal
++          testId="kick-confirm"
++          title="Kick pemain?"
++          onEscape={() => setKickTarget(null)}
++          actions={[
++            { label: 'Batal', onClick: () => setKickTarget(null) },
++            { label: 'Kick', onClick: confirmKick, primary: true },
++          ]}
++        >
++          {kickConfirmText((kickTarget || '').slice(0, 8), kickPlayerInfo ? kickPlayerInfo.inRoom === false : true)}
++        </Modal>
++      )}
++
++      {restrictedModalOpen && (
++        <Modal
++          testId="restricted-modal"
++          title={RESTRICTED_MODAL.title}
++          actions={[{ label: RESTRICTED_MODAL.ok, onClick: closeRestrictedModal, primary: true, autoFocus: true }]}
++        >
++          {RESTRICTED_MODAL.message}
++        </Modal>
++      )}
+     </div>
+   )
+ }
+diff --git a/frontend/src/store/gameStore.js b/frontend/src/store/gameStore.js
+index 6cb09d6..cab7d89 100644
+--- a/frontend/src/store/gameStore.js
++++ b/frontend/src/store/gameStore.js
+@@ -30,6 +30,7 @@ export const useGameStore = create((set, get) => ({
+       user: null, token: null, roomCode: null, roomInfo: null, gameState: null,
+       currentTurn: null, selectedIds: [], setResult: null, events: [],
+       connected: false, sync: 'ok', syncMessage: null, notice: null,
++      restricted: false, restrictedModalOpen: false,
+     })
+   },
+ 
+@@ -50,6 +51,14 @@ export const useGameStore = create((set, get) => ({
+   setNotice: (notice) => set({ notice }),
+ 
+   // ── Room ────────────────────────────────────────────────────────
++  // Di-Kick oleh Host saat berada di Result: tetap di Result, tidak boleh Back to Room sebelum kembali ke Homepage.
++  // Sumber kebenaran ada di server (dipulihkan lewat session_restored.restricted); ini hanya cerminan untuk UI.
++  restricted: false,
++  setRestricted: (v) => set({ restricted: !!v }),
++  // Modal "Akses Room Dibatasi": hanya dibuka oleh tindakan pemain (menekan Back to Room), tidak pernah otomatis.
++  restrictedModalOpen: false,
++  openRestrictedModal:  () => set({ restrictedModalOpen: true }),
++  closeRestrictedModal: () => set({ restrictedModalOpen: false }),
+   roomCode: null,
+   roomInfo: null,
+   setRoomCode: (code) => set({ roomCode: code }),
+@@ -63,6 +72,8 @@ export const useGameStore = create((set, get) => ({
+     currentTurn: state.game?.currentTurn ?? null,
+     selectedIds: [],
+     setResult: (state.view === 'result' || state.status === 'done') ? (state.setResult ?? null) : null,
++    restricted: !!state.restricted,
++    restrictedModalOpen: false,
+     error: null,
+   }),
+   // Back to Room: tetap di room yang sama, tetapi semua sisa state game/set sebelumnya dibuang
+@@ -75,6 +86,8 @@ export const useGameStore = create((set, get) => ({
+     selectedIds: [],
+     setResult: null,
+     events: [],
++    restricted: false,
++    restrictedModalOpen: false,
+     error: null,
+   }),
+   clearRoomState: () => set({
+@@ -85,6 +98,8 @@ export const useGameStore = create((set, get) => ({
+     selectedIds: [],
+     setResult: null,
+     events: [],
++    restricted: false,
++    restrictedModalOpen: false,
+     error: null,
+   }),
+ 
+diff --git a/frontend/src/utils/kick.js b/frontend/src/utils/kick.js
+new file mode 100644
+index 0000000..d805828
+--- /dev/null
++++ b/frontend/src/utils/kick.js
+@@ -0,0 +1,49 @@
++// Logika murni untuk fitur Host Kick di klien. Server adalah sumber kebenaran: semua aturan di sini hanya
++// menentukan apa yang DITAMPILKAN; kick_player/return_to_room tetap divalidasi ulang di backend.
++
++/** Tombol Kick hanya untuk Host, terhadap pemain lain yang masih menjadi anggota room, dan bukan saat game berlangsung. */
++export function canShowKick({ myId, hostId, targetId, players = [], status }) {
++  if (!myId || hostId !== myId) return false
++  if (targetId === myId) return false
++  if (status === 'playing') return false
++  return players.some(p => p.id === targetId)
++}
++
++/** Teks konfirmasi Kick. Pemain yang masih di Result tetap melihat hasil tetapi tidak bisa kembali ke Room. */
++export function kickConfirmText(name, targetOnResult) {
++  return targetOnResult
++    ? `Keluarkan ${name} dari room? Ia tetap bisa melihat hasil pertandingan, tetapi tidak bisa kembali ke Room sebelum kembali ke Homepage.`
++    : `Keluarkan ${name} dari room? Ia masih bisa bergabung kembali ke room ini.`
++}
++
++/**
++ * Keputusan saat tombol Back to Room ditekan.
++ *   'busy'       → ada permintaan lain yang sedang berjalan, abaikan
++ *   'restricted' → pemain di-Kick: tampilkan modal "Akses Room Dibatasi" (tanpa mengirim apa pun ke server)
++ *   'no_code' / 'offline' → tampilkan pesan error biasa
++ *   'emit'       → kirim return_to_room
++ */
++export function backToRoomDecision({ busy, restricted, code, connected }) {
++  if (busy) return 'busy'
++  if (restricted) return 'restricted'
++  if (!code) return 'no_code'
++  if (!connected) return 'offline'
++  return 'emit'
++}
++
++export const RESTRICTED_MODAL = {
++  title: 'Akses Room Dibatasi',
++  message: 'Kamu telah dikeluarkan dari Room oleh Host. Untuk bergabung kembali, silakan kembali ke Homepage terlebih dahulu.',
++  ok: 'OK',
++}
++
++export function messageForKickError(code) {
++  switch (code) {
++    case 'NOT_HOST':           return 'Hanya Host yang bisa mengeluarkan pemain.'
++    case 'GAME_IN_PROGRESS':   return 'Pemain tidak bisa dikeluarkan saat pertandingan berlangsung.'
++    case 'TARGET_NOT_IN_ROOM': return 'Pemain itu sudah tidak ada di room.'
++    case 'CANNOT_KICK_SELF':   return 'Kamu tidak bisa mengeluarkan dirimu sendiri.'
++    case 'NOT_IN_ROOM':        return 'Kamu tidak berada di room ini.'
++    default:                   return `Gagal mengeluarkan pemain: ${code}`
++  }
++}
+diff --git a/frontend/src/utils/session.js b/frontend/src/utils/session.js
+index 2ef24ab..6743df7 100644
+--- a/frontend/src/utils/session.js
++++ b/frontend/src/utils/session.js
+@@ -29,6 +29,7 @@ export function messageForSessionNone(reason) {
+   switch (reason) {
+     case 'EXPIRED':     return 'Kamu terputus terlalu lama sehingga dikeluarkan dari room.'
+     case 'ROOM_CLOSED': return 'Room sudah ditutup karena semua pemain terputus terlalu lama.'
++    case 'KICKED':      return 'Kamu dikeluarkan dari room oleh Host. Kamu bisa bergabung kembali.'
+     case 'NO_ROOM':
+     case 'NOT_IN_ROOM': return 'Room tidak ditemukan atau sudah tidak tersedia.'
+     default:            return 'Sesi sebelumnya tidak bisa dipulihkan.'
+diff --git a/frontend/tests/kick-ui/render.mjs b/frontend/tests/kick-ui/render.mjs
+new file mode 100644
+index 0000000..460def3
+--- /dev/null
++++ b/frontend/tests/kick-ui/render.mjs
+@@ -0,0 +1,155 @@
++// Render statis ResultPage.jsx dan LobbyPage.jsx ASLI (react-dom/server). Dilewati bila react/typescript tidak ada.
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import os from 'node:os'
++import path from 'node:path'
++import { createRequire } from 'node:module'
++import { pathToFileURL, fileURLToPath } from 'node:url'
++import { execSync } from 'node:child_process'
++
++const here = path.dirname(fileURLToPath(import.meta.url))
++const SRC = path.join(here, '../../src')
++const roots = [...(process.env.NODE_PATH || '').split(path.delimiter).filter(Boolean)]
++try { roots.push(execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()) } catch {}
++const req = createRequire(import.meta.url)
++const find = (name) => { try { return req.resolve(name, { paths: [path.join(here, '../..'), ...roots] }) } catch { return null } }
++const reactPath = find('react'), serverPath = find('react-dom/server'), tsPath = find('typescript')
++if (!reactPath || !serverPath || !tsPath) { console.log('  SKIP   render Result/Lobby: react / react-dom / typescript tidak ditemukan di mesin ini'); process.exit(0) }
++const ts = req(tsPath), { renderToString } = req(serverPath), React = req(reactPath)
++
++const ss = new Map(); const fake = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
++globalThis.sessionStorage = fake; globalThis.localStorage = fake
++globalThis.window = { innerWidth: 1000, addEventListener() {}, removeEventListener() {}, location: { pathname: '/result' } }
++globalThis.document = { activeElement: null }
++const origErr = console.error; console.error = (...a) => { if (!/useLayoutEffect does nothing/.test(String(a[0]))) origErr(...a) }
++
++const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'martil-kick-'))
++for (const d of ['pages', 'utils', 'store', 'stubs', 'components']) fs.mkdirSync(path.join(OUT, d))
++fs.writeFileSync(path.join(OUT, 'stubs/zustand.mjs'), `
++export function create(init) {
++  let state; const set = (p) => { state = { ...state, ...(typeof p === 'function' ? p(state) : p) } }; const get = () => state
++  state = init(set, get); const useStore = () => state; useStore.getState = get; useStore.setState = set; return useStore
++}`)
++fs.writeFileSync(path.join(OUT, 'stubs/router.mjs'), `export const useNavigate = () => () => {}`)
++fs.writeFileSync(path.join(OUT, 'stubs/socket.mjs'), `export const emitSocket = () => true`)
++const map = (prefix) => (spec) => ({
++  react: pathToFileURL(reactPath).href, 'react-router-dom': `${prefix}stubs/router.mjs`, zustand: `${prefix}stubs/zustand.mjs`,
++  '../hooks/useSocket': `${prefix}stubs/socket.mjs`,
++}[spec] ?? ((spec.startsWith('../utils/') || spec.startsWith('../components/') || spec.startsWith('../store/')) ? spec + '.mjs' : spec))
++const build = (rel, dest) => {
++  let code = ts.transpileModule(fs.readFileSync(path.join(SRC, rel), 'utf8'), { compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
++  code = code.replace(/from '([^']+)'/g, (m, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
++  fs.writeFileSync(path.join(OUT, dest), code)
++}
++for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
++const url = (f) => pathToFileURL(path.join(OUT, f)).href
++const { useGameStore: store } = await import(url('store/gameStore.mjs'))
++const ResultPage = (await import(url('pages/ResultPage.mjs'))).default
++const LobbyPage  = (await import(url('pages/LobbyPage.mjs'))).default
++
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++
++const IDS = ['me00000000', 'p200000000', 'p300000000', 'p400000000']
++const result = {
++  rankings: IDS.map((id, i) => ({ id, totalScore: 10 - i })), setScores: {},
++  gameHistory: [1, 2, 3, 4, 5, 6].map(n => ({ gameNumber: n, winnerId: IDS[n % 4], scores: IDS.map(id => ({ id, score: n })) })),
++}
++const state = ({ me = IDS[0], host = IDS[0], members = IDS, restricted = false, modal = false, status = 'done' } = {}) => store.setState({
++  user: { id: me }, roomCode: 'ABC123', connected: true, error: null, events: [], restricted, restrictedModalOpen: modal, setResult: result,
++  roomInfo: { code: 'ABC123', hostId: host, status, maxGames: 6, players: members.map(id => ({ id, connected: true, inRoom: false })), gameHistory: [] },
++})
++const renderResult = (o) => { state(o); return renderToString(React.createElement(ResultPage)).replace(/<!-- -->/g, '') }
++const renderLobby  = (o) => { state({ status: 'waiting', ...o }); store.setState({ setResult: null, roomInfo: { ...store.getState().roomInfo, players: (o?.members || IDS).map(id => ({ id, connected: true, inRoom: true })) } }); return renderToString(React.createElement(LobbyPage)).replace(/<!-- -->/g, '') }
++const count = (html, re) => (html.match(re) || []).length
++// Rentang sebuah elemen <div ...> (dari indeks awal tag sampai penutup yang seimbang).
++function divRange(html, startIdx) {
++  let depth = 0
++  for (const m of html.slice(startIdx).matchAll(/<div\b|<\/div>/g)) {
++    depth += m[0] === '</div>' ? -1 : 1
++    if (depth === 0) return [startIdx, startIdx + m.index + m[0].length]
++  }
++  throw new Error('div tidak seimbang')
++}
++const tag = (html, id) => { const i = html.indexOf(`data-testid="${id}"`); assert.ok(i > 0, `${id} tidak ada`); return html.lastIndexOf('<div', i) }
++
++// ── 1. Result Page scrollable ──
++t('Result: halaman dibagi area konten yang bisa di-scroll dan area navigasi sticky di luar area scroll', () => {
++  const html = renderResult()
++  const [s0, s1] = divRange(html, tag(html, 'result-scroll'))
++  const nav = tag(html, 'result-nav')
++  assert.ok(nav >= s1, 'area navigasi harus saudara (bukan anak) area scroll')
++  const scrollStyle = html.slice(s0, html.indexOf('>', s0))
++  assert.match(scrollStyle, /overflow-y:\s*auto/); assert.match(scrollStyle, /flex:\s*1/); assert.match(scrollStyle, /min-height:\s*0/)
++  assert.match(html.slice(0, 400), /height:\s*100dvh/)                         // tinggi tetap = viewport, bukan min-height yang memanjang
++  assert.doesNotMatch(html.slice(0, 400), /min-height:\s*100dvh/)
++  const navStyle = html.slice(nav, html.indexOf('>', nav)); assert.match(navStyle, /flex-shrink:\s*0/)
++})
++t('Result: seluruh konten (4 peringkat + riwayat 6 game) ada di area scroll; kedua tombol navigasi ada di area sticky dan aktif', () => {
++  const html = renderResult()
++  const [s0, s1] = divRange(html, tag(html, 'result-scroll'))
++  const scroll = html.slice(s0, s1)
++  for (const id of IDS) assert.ok(scroll.includes(id.slice(0, 8)), `peringkat ${id} tidak ada di area scroll`)
++  assert.ok(scroll.includes('Riwayat Game')); assert.equal(count(scroll, /Game \d/g), 6)
++  assert.ok(!scroll.includes('Back to Room') && !scroll.includes('Back to Menu Utama'))
++  const [n0, n1] = divRange(html, tag(html, 'result-nav')); const nav = html.slice(n0, n1)
++  assert.equal(count(nav, /<button/g), 2); assert.ok(nav.includes('Back to Room') && nav.includes('Back to Menu Utama'))
++  assert.equal(count(nav, /disabled=""/g), 0)
++})
++t('Result: ukuran/proporsi konten dipertahankan (maxWidth 400, ukuran tombol 13px/15px)', () => {
++  const html = renderResult()
++  assert.ok(count(html, /max-width:\s*400px/g) >= 2)
++  assert.match(html, /padding:\s*13px[^>]*font-size:\s*15px|font-size:\s*15px[^>]*padding:\s*13px/)
++})
++
++// ── 2. Kick di Result ──
++t('Result: Host melihat tombol Kick untuk 3 pemain lain (tidak untuk dirinya)', () => {
++  const html = renderResult()
++  assert.equal(count(html, />Kick</g), 3)
++})
++t('Result: non-Host tidak melihat tombol Kick', () => {
++  assert.equal(count(renderResult({ me: IDS[1], host: IDS[0] }), />Kick</g), 0)
++})
++t('Result: pemain yang sudah tidak ada di room tidak punya tombol Kick; hasilnya tetap tampil', () => {
++  const html = renderResult({ members: [IDS[0], IDS[1], IDS[2]] })
++  assert.equal(count(html, />Kick</g), 2); assert.ok(html.includes(IDS[3].slice(0, 8)))
++})
++t('Result: tidak ada modal secara default maupun otomatis setelah di-Kick (restricted=true, modal tertutup)', () => {
++  assert.ok(!renderResult().includes('Akses Room Dibatasi'))
++  const html = renderResult({ me: IDS[1], restricted: true })
++  assert.ok(!html.includes('Akses Room Dibatasi')); assert.ok(!html.includes('role="dialog"'))
++})
++t('Result (di-Kick): seluruh hasil tetap tampil dan kedua tombol navigasi tetap aktif', () => {
++  const html = renderResult({ me: IDS[1], restricted: true })
++  assert.equal(count(html, /Game \d/g), 6)
++  const [n0, n1] = divRange(html, tag(html, 'result-nav')); assert.equal(count(html.slice(n0, n1), /disabled=""/g), 0)
++})
++t('Modal "Akses Room Dibatasi": judul, pesan, satu tombol OK, blocking (overlay fixed menutup layar, role=dialog aria-modal)', () => {
++  const html = renderResult({ me: IDS[1], restricted: true, modal: true })
++  const m0 = tag(html, 'restricted-modal'); const [a, b] = divRange(html, m0); const modal = html.slice(a, b)
++  assert.ok(modal.includes('Akses Room Dibatasi'))
++  assert.ok(modal.includes('Kamu telah dikeluarkan dari Room oleh Host. Untuk bergabung kembali, silakan kembali ke Homepage terlebih dahulu.'))
++  assert.equal(count(modal, /<button/g), 1); assert.match(modal, /<button[^>]*>OK<\/button>/)
++  assert.match(modal, /role="dialog"/); assert.match(modal, /aria-modal="true"/)
++  const overlay = modal.slice(0, modal.indexOf('>')); assert.match(overlay, /position:\s*fixed/); assert.match(overlay, /inset:\s*0/)
++})
++t('Kick TIDAK tampil sebagai modal konfirmasi sebelum host menekan Kick', () => {
++  assert.ok(!renderResult().includes('kick-confirm'))
++})
++
++// ── 3. Lobby (Room) ──
++t('Room: Host melihat Kick untuk 3 pemain lain; non-Host tidak', () => {
++  assert.equal(count(renderLobby(), />Kick</g), 3)
++  assert.equal(count(renderLobby({ me: IDS[2], host: IDS[0] }), />Kick</g), 0)
++})
++t('Room: layout non-Host tidak berubah (tanpa Kick, tombol Exit Room dan daftar kursi tetap)', () => {
++  const html = renderLobby({ me: IDS[2], host: IDS[0] })
++  assert.ok(html.includes('Exit Room') && html.includes('Menunggu host memulai game') && html.includes('4/4 pemain'))
++})
++t('Lobby: pemain di-Kick dari Result yang tersasar ke Lobby tidak menggambar Room (dipulangkan ke Result)', () => {
++  state({ me: IDS[1], host: IDS[0], restricted: true, status: 'waiting' })
++  store.setState({ roomInfo: { ...store.getState().roomInfo, players: [IDS[0], IDS[2], IDS[3]].map(id => ({ id, connected: true, inRoom: true })) } })
++  const html = renderToString(React.createElement(LobbyPage))
++  assert.equal(html, '')
++})
++console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/kick-ui/run.mjs b/frontend/tests/kick-ui/run.mjs
+new file mode 100644
+index 0000000..83eb5eb
+--- /dev/null
++++ b/frontend/tests/kick-ui/run.mjs
+@@ -0,0 +1,44 @@
++import assert from 'node:assert/strict'
++import { canShowKick, kickConfirmText, backToRoomDecision, RESTRICTED_MODAL, messageForKickError } from './utils/kick.mjs'
++
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++
++const players = ['host', 'a', 'b', 'c'].map(id => ({ id }))
++const base = { myId: 'host', hostId: 'host', players, status: 'waiting' }
++
++t('tombol Kick: hanya Host, hanya ke pemain lain yang masih ada di room', () => {
++  assert.equal(canShowKick({ ...base, targetId: 'a' }), true)
++  assert.equal(canShowKick({ ...base, targetId: 'host' }), false)                       // tidak ke diri sendiri
++  assert.equal(canShowKick({ ...base, targetId: 'ghost' }), false)                      // sudah tidak di room
++  assert.equal(canShowKick({ ...base, myId: 'a', targetId: 'b' }), false)               // bukan Host
++  assert.equal(canShowKick({ ...base, myId: undefined, targetId: 'a' }), false)
++})
++t('tombol Kick tersedia di Room dan Result, tidak saat game berlangsung', () => {
++  assert.equal(canShowKick({ ...base, status: 'done', targetId: 'a' }), true)
++  assert.equal(canShowKick({ ...base, status: 'waiting', targetId: 'a' }), true)
++  assert.equal(canShowKick({ ...base, status: 'playing', targetId: 'a' }), false)
++})
++t('Back to Room: pemain yang di-Kick → modal (tanpa emit), walau offline atau tanpa kode room', () => {
++  const ok = { busy: null, restricted: false, code: 'ABC123', connected: true }
++  assert.equal(backToRoomDecision(ok), 'emit')
++  assert.equal(backToRoomDecision({ ...ok, restricted: true }), 'restricted')
++  assert.equal(backToRoomDecision({ ...ok, restricted: true, connected: false }), 'restricted')
++  assert.equal(backToRoomDecision({ ...ok, restricted: true, code: null }), 'restricted')
++  assert.equal(backToRoomDecision({ ...ok, connected: false }), 'offline')
++  assert.equal(backToRoomDecision({ ...ok, code: null }), 'no_code')
++  assert.equal(backToRoomDecision({ ...ok, busy: 'menu' }), 'busy')
++  assert.equal(backToRoomDecision({ ...ok, busy: 'menu', restricted: true }), 'busy')
++})
++t('modal pembatasan memakai teks persis sesuai spesifikasi', () => {
++  assert.equal(RESTRICTED_MODAL.title, 'Akses Room Dibatasi')
++  assert.equal(RESTRICTED_MODAL.message, 'Kamu telah dikeluarkan dari Room oleh Host. Untuk bergabung kembali, silakan kembali ke Homepage terlebih dahulu.')
++  assert.equal(RESTRICTED_MODAL.ok, 'OK')
++})
++t('teks konfirmasi Kick membedakan pemain di Room vs di Result; pesan error ramah', () => {
++  assert.match(kickConfirmText('abc12345', false), /bisa bergabung kembali/)
++  assert.match(kickConfirmText('abc12345', true), /tidak bisa kembali ke Room sebelum kembali ke Homepage/)
++  assert.match(messageForKickError('NOT_HOST'), /Hanya Host/)
++  assert.match(messageForKickError('XYZ'), /XYZ/)
++})
++console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/kick-ui/run.sh b/frontend/tests/kick-ui/run.sh
+new file mode 100644
+index 0000000..0df20f7
+--- /dev/null
++++ b/frontend/tests/kick-ui/run.sh
+@@ -0,0 +1,11 @@
++#!/usr/bin/env bash
++# Menguji logika Host Kick di klien (utils/kick.js ASLI) dan merender ResultPage/LobbyPage ASLI dengan
++# React + react-dom/server (render statis; dilewati otomatis bila react/react-dom/typescript tidak ada).
++#   bash tests/kick-ui/run.sh      (dari folder frontend)
++set -euo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
++mkdir -p "$OUT/utils"
++cp "$SRC/utils/kick.js" "$OUT/utils/kick.mjs"
++cp "$HERE/run.mjs" "$OUT/run.mjs"
++node "$OUT/run.mjs"
++NODE_PATH="${NODE_PATH:-}" node "$HERE/render.mjs"
+diff --git a/frontend/tests/sync.sim/run.mjs b/frontend/tests/sync.sim/run.mjs
+index 745c3c8..4183a36 100644
+--- a/frontend/tests/sync.sim/run.mjs
++++ b/frontend/tests/sync.sim/run.mjs
+@@ -168,4 +168,79 @@ t('fixture server asli: view result → /result, setResult terisi, bukan /lobby'
+   assert.equal(st().setResult.gameHistory.length, 4)
+   assert.equal(st().roomInfo.players.filter(p => p.inRoom === false).length, 3)
+ })
++
++// ── Host Kick (klien): event server → state/navigasi ────────────────────────────
++const resultState = { code: 'ABC123', status: 'done', hostId: 'u2', players: [{ id: 'u1', connected: true, inRoom: false }, { id: 'u2', connected: true, inRoom: false }], game: null, view: 'result', setResult: { rankings: [{ id: 'u1', totalScore: 1 }], setScores: {}, gameHistory: [{ gameNumber: 1, scores: [] }] } }
++t('Kick di Room: event "kicked" membersihkan state room, menampilkan pesan, kembali ke Menu Utama; tidak membatasi', () => {
++  s2.fire('session_restored', { ...resultState, status: 'waiting', view: 'room', setResult: null })
++  s2.fire('kicked', { roomCode: 'ABC123' })
++  assert.equal(st().roomCode, null); assert.equal(st().roomInfo, null); assert.equal(st().restricted, false)
++  assert.match(st().notice, /dikeluarkan dari room oleh Host/)
++  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
++  st().setNotice(null)
++})
++t('Kick di Result: hanya menandai pembatasan; tetap di Result, hasil tetap ada, TANPA notifikasi/modal/error/navigasi otomatis', () => {
++  s2.fire('session_restored', resultState)
++  const navBefore = navCalls.length
++  s2.fire('kicked_from_result', { roomCode: 'ABC123' })
++  assert.equal(st().restricted, true)
++  assert.equal(st().restrictedModalOpen, false); assert.equal(st().notice, null); assert.equal(st().error, null)
++  assert.equal(navCalls.length, navBefore, 'tidak boleh ada navigasi')
++  assert.equal(st().setResult.gameHistory.length, 1); assert.equal(st().roomCode, 'ABC123')
++})
++t('Back to Room ditolak server (KICKED_FROM_ROOM) → modal terbuka, bukan pesan error; menekan lagi membukanya lagi', () => {
++  st().closeRestrictedModal()
++  s2.fire('return_room_error', { code: 'KICKED_FROM_ROOM' })
++  assert.equal(st().restrictedModalOpen, true); assert.equal(st().error, null); assert.equal(st().restricted, true)
++  assert.equal(st().events[0].code, 'KICKED_FROM_ROOM')
++  st().closeRestrictedModal(); assert.equal(st().restrictedModalOpen, false)
++  s2.fire('return_room_error', { code: 'KICKED_FROM_ROOM' }); assert.equal(st().restrictedModalOpen, true)
++  st().closeRestrictedModal()
++})
++t('error return_to_room lain tetap pesan biasa dan tidak membuka modal', () => {
++  s2.fire('return_room_error', { code: 'GAME_IN_PROGRESS' })
++  assert.equal(st().restrictedModalOpen, false); assert.match(st().error, /Gagal kembali ke room/)
++  st().clearError()
++})
++t('refresh/reconnect saat dibatasi: session_restored(restricted) → /result, pembatasan tetap, modal TIDAK terbuka otomatis', () => {
++  st().openRestrictedModal()
++  s2.fire('session_restored', { code: 'ABC123', view: 'result', restricted: true, status: 'done', hostId: null, players: [], game: null, setResult: resultState.setResult })
++  assert.deepEqual(navCalls.at(-1), ['/result', { replace: true }])
++  assert.equal(st().restricted, true); assert.equal(st().restrictedModalOpen, false)
++  assert.equal(st().setResult.gameHistory.length, 1)
++})
++t('session_restored biasa (tidak dibatasi) mereset pembatasan', () => {
++  s2.fire('session_restored', resultState)
++  assert.equal(st().restricted, false)
++})
++t('kembali ke Homepage (room_left) mengakhiri pembatasan dan menutup modal', () => {
++  s2.fire('kicked_from_result', {}); st().openRestrictedModal()
++  s2.fire('room_left', { roomCode: 'ABC123', roomDeleted: false })
++  assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false); assert.equal(st().roomInfo, null)
++  assert.deepEqual(navCalls.at(-1), ['/lobby', undefined])
++})
++t('timeout disconnect: session_none (EXPIRED) mengakhiri pembatasan dan memulangkan ke Menu Utama', () => {
++  s2.fire('session_restored', resultState); s2.fire('kicked_from_result', {})
++  assert.equal(st().restricted, true)
++  window.location.pathname = '/result'                       // pemain sedang di halaman Result
++  s2.fire('session_none', { reason: 'EXPIRED' })
++  assert.equal(st().restricted, false); assert.equal(st().roomInfo, null); assert.match(st().notice, /terputus terlalu lama/)
++  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
++  window.location.pathname = '/lobby'; st().setNotice(null)
++})
++t('session_none (KICKED) setelah di-Kick saat offline menampilkan pesan yang jelas', () => {
++  s2.fire('session_none', { reason: 'KICKED' })
++  assert.match(st().notice, /dikeluarkan dari room oleh Host/)
++  st().setNotice(null)
++})
++t('kick_error → pesan error yang ramah (bukan kode mentah)', () => {
++  s2.fire('kick_error', { code: 'NOT_HOST' }); assert.match(st().error, /Hanya Host/)
++  s2.fire('kick_error', { code: 'GAME_IN_PROGRESS' }); assert.match(st().error, /pertandingan berlangsung/)
++  st().clearError()
++})
++t('logout membersihkan pembatasan; listener Kick tidak ganda', () => {
++  st().setRestricted(true); st().openRestrictedModal(); st().logout()
++  assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false)
++  for (const ev of ['kicked', 'kicked_from_result', 'kick_error', 'return_room_error']) assert.equal(s2.listeners[ev].length, 1, ev)
++})
+ console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/sync.sim/run.sh b/frontend/tests/sync.sim/run.sh
+index c98ec06..bd9051b 100644
+--- a/frontend/tests/sync.sim/run.sh
++++ b/frontend/tests/sync.sim/run.sh
+@@ -6,10 +6,10 @@ set -euo pipefail
+ HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
+ mkdir -p "$OUT/hooks" "$OUT/store" "$OUT/utils" "$OUT/stubs"
+ cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"; cp "$HERE/fixture-restored-waiting.json" "$OUT/"
+-for f in hooks/useSocket store/gameStore utils/session; do
++for f in hooks/useSocket store/gameStore utils/session utils/kick; do
+   sed -e "s#from 'zustand'#from '../stubs/zustand.mjs'#" -e "s#from 'react'#from '../stubs/react.mjs'#" \
+       -e "s#from 'socket.io-client'#from '../stubs/sio.mjs'#" -e "s#from 'react-router-dom'#from '../stubs/router.mjs'#" \
+-      -e "s#'../store/gameStore'#'../store/gameStore.mjs'#" -e "s#'../utils/session'#'../utils/session.mjs'#" \
++      -e "s#'../store/gameStore'#'../store/gameStore.mjs'#" -e "s#'../utils/session'#'../utils/session.mjs'#" -e "s#'../utils/kick'#'../utils/kick.mjs'#" \
+       -e "s#import.meta.env.VITE_SERVER_URL#undefined#" "$SRC/$f.js" > "$OUT/$f.mjs"
+ done
+ node "$OUT/run.mjs" 2>&1 | grep -v -i warning

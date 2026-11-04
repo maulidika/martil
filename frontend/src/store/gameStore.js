@@ -30,6 +30,7 @@ export const useGameStore = create((set, get) => ({
       user: null, token: null, roomCode: null, roomInfo: null, gameState: null,
       currentTurn: null, selectedIds: [], setResult: null, events: [],
       connected: false, sync: 'ok', syncMessage: null, notice: null,
+      restricted: false, restrictedModalOpen: false,
     })
   },
 
@@ -50,6 +51,14 @@ export const useGameStore = create((set, get) => ({
   setNotice: (notice) => set({ notice }),
 
   // ── Room ────────────────────────────────────────────────────────
+  // Di-Kick oleh Host saat berada di Result: tetap di Result, tidak boleh Back to Room sebelum kembali ke Homepage.
+  // Sumber kebenaran ada di server (dipulihkan lewat session_restored.restricted); ini hanya cerminan untuk UI.
+  restricted: false,
+  setRestricted: (v) => set({ restricted: !!v }),
+  // Modal "Akses Room Dibatasi": hanya dibuka oleh tindakan pemain (menekan Back to Room), tidak pernah otomatis.
+  restrictedModalOpen: false,
+  openRestrictedModal:  () => set({ restrictedModalOpen: true }),
+  closeRestrictedModal: () => set({ restrictedModalOpen: false }),
   roomCode: null,
   roomInfo: null,
   setRoomCode: (code) => set({ roomCode: code }),
@@ -63,6 +72,8 @@ export const useGameStore = create((set, get) => ({
     currentTurn: state.game?.currentTurn ?? null,
     selectedIds: [],
     setResult: (state.view === 'result' || state.status === 'done') ? (state.setResult ?? null) : null,
+    restricted: !!state.restricted,
+    restrictedModalOpen: false,
     error: null,
   }),
   // Back to Room: tetap di room yang sama, tetapi semua sisa state game/set sebelumnya dibuang
@@ -75,6 +86,8 @@ export const useGameStore = create((set, get) => ({
     selectedIds: [],
     setResult: null,
     events: [],
+    restricted: false,
+    restrictedModalOpen: false,
     error: null,
   }),
   clearRoomState: () => set({
@@ -85,6 +98,8 @@ export const useGameStore = create((set, get) => ({
     selectedIds: [],
     setResult: null,
     events: [],
+    restricted: false,
+    restrictedModalOpen: false,
     error: null,
   }),
 

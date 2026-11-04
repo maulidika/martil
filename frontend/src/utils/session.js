@@ -29,6 +29,7 @@ export function messageForSessionNone(reason) {
   switch (reason) {
     case 'EXPIRED':     return 'Kamu terputus terlalu lama sehingga dikeluarkan dari room.'
     case 'ROOM_CLOSED': return 'Room sudah ditutup karena semua pemain terputus terlalu lama.'
+    case 'KICKED':      return 'Kamu dikeluarkan dari room oleh Host. Kamu bisa bergabung kembali.'
     case 'NO_ROOM':
     case 'NOT_IN_ROOM': return 'Room tidak ditemukan atau sudah tidak tersedia.'
     default:            return 'Sesi sebelumnya tidak bisa dipulihkan.'

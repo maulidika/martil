@@ -6,6 +6,7 @@ import {
   SYNC_FAIL_AFTER_MS, RESUME_TIMEOUT_MS,
   routeForRestoredState, messageForSessionNone,
 } from '../utils/session'
+import { messageForKickError } from '../utils/kick'
 
 const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
 
@@ -158,7 +159,7 @@ export function useSocket() {
       const hadRoom = !!(st.roomCode || st.roomInfo)
       debugLog('SESSION_NONE', { reason, hadRoom })
       if (hadRoom) st.clearRoomState()
-      if (hadRoom || reason === 'EXPIRED' || reason === 'ROOM_CLOSED') {
+      if (hadRoom || reason === 'EXPIRED' || reason === 'ROOM_CLOSED' || reason === 'KICKED') {
         st.setNotice(messageForSessionNone(reason))
       }
       // Jangan biarkan pemain tertinggal di halaman yang butuh room.
@@ -238,8 +239,36 @@ export function useSocket() {
 
     s.on('return_room_error', ({ code }) => {
       debugLog('RETURN_TO_ROOM_FAILED', { code })
+      if (code === 'KICKED_FROM_ROOM') {
+        // Server menolak karena pemain di-Kick: tampilkan modal (respons atas tindakan pemain), bukan pesan error.
+        const st = useGameStore.getState()
+        st.setRestricted(true)
+        st.openRestrictedModal()
+        st.pushEvent({ type: 'return_room_error', code })
+        return
+      }
       setError(`Gagal kembali ke room: ${code}`)
       useGameStore.getState().pushEvent({ type: 'return_room_error', code })
+    })
+
+    // ── Host Kick ──────────────────────────────────────────────────
+    // Di-Kick saat di Room: keluar dari room dan kembali ke Menu Utama (boleh bergabung lagi).
+    s.on('kicked', () => {
+      debugLog('KICKED_FROM_ROOM')
+      const st = useGameStore.getState()
+      st.clearRoomState()
+      st.setNotice(messageForSessionNone('KICKED'))
+      navigate('/lobby', { replace: true })
+    })
+    // Di-Kick saat di Result: tetap di Result (tanpa notifikasi otomatis); hanya menandai pembatasan.
+    s.on('kicked_from_result', () => {
+      debugLog('KICKED_FROM_RESULT')
+      useGameStore.getState().setRestricted(true)
+    })
+    s.on('kick_error', ({ code }) => {
+      debugLog('KICK_FAILED', { code })
+      setError(messageForKickError(code))
+      setTimeout(() => useGameStore.getState().clearError(), 3000)
     })
 
     s.on('leave_room_error', ({ code }) => {

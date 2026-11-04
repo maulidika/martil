@@ -76,6 +76,13 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     socket.on('leave_room', ({ roomCode } = {}) => {
       const code = String(roomCode || '').toUpperCase();
       debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
+      // Pemain yang di-Kick dari Result: kembali ke Homepage mengakhiri pembatasan.
+      const restriction = rm.getRestriction(userId);
+      if (restriction) {
+        rm.clearRestriction(userId);
+        debugLog('KICK_RESTRICTION_CLEARED', { userId, roomCode: restriction.code, how: 'leave_room' });
+        return socket.emit('room_left', { roomCode: restriction.code, roomDeleted: false });
+      }
       const result = rm.leaveRoom(code, userId);
       if (!result.ok) {
         debugLog('LEAVE_ROOM_REJECTED', { userId, roomCode: code, reason: result.error });
@@ -106,6 +113,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     socket.on('return_to_room', ({ roomCode } = {}) => {
       const code = String(roomCode || '').toUpperCase();
       debugLog('RETURN_TO_ROOM_REQUEST', { userId, roomCode: code });
+      if (rm.getRestriction(userId)) {   // di-Kick dari Result: tidak boleh kembali ke Room sebelum ke Homepage
+        debugLog('RETURN_TO_ROOM_REJECTED', { userId, roomCode: code, reason: 'KICKED_FROM_ROOM' });
+        return socket.emit('return_room_error', { code: 'KICKED_FROM_ROOM' });
+      }
       if (!socket.rooms.has(code)) {
         socket.emit('return_room_error', { code: 'NOT_IN_ROOM' });
         return socket.emit('error', { code: 'NOT_IN_ROOM' });
@@ -125,6 +136,29 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       });
       socket.emit('room_returned', rm.publicState(code, userId));
       socket.to(code).emit('room_updated', rm.publicState(code, null));
+    });
+
+    // ── kick_player ────────────────────────────────────────────────────────
+    // Hanya Host, hanya saat game tidak berlangsung. Semua validasi di roomManager.kickPlayer.
+    socket.on('kick_player', ({ roomCode, targetId } = {}) => {
+      const code = String(roomCode || '').toUpperCase();
+      const target = String(targetId || '');
+      if (!socket.rooms.has(code)) return socket.emit('kick_error', { code: 'NOT_IN_ROOM' });
+      const result = rm.kickPlayer(code, userId, target);
+      if (!result.ok) {
+        debugLog('KICK_REJECTED', { roomCode: code, hostId: userId, targetId: target, reason: result.error });
+        return socket.emit('kick_error', { code: result.error });
+      }
+
+      // Hanya socket milik target yang dilepas dari room; pemain lain tidak terpengaruh.
+      for (const [, other] of io.sockets.sockets) {
+        if (other.user?.id !== target || !other.rooms.has(code)) continue;
+        other.leave(code);
+        other.emit(result.mode === 'result' ? 'kicked_from_result' : 'kicked', { roomCode: code });
+      }
+      debugLog('PLAYER_KICKED', { roomCode: code, hostId: userId, targetId: target, mode: result.mode, remaining: result.room.players.length });
+      io.to(code).emit('room_updated', rm.publicState(code, null));
+      socket.emit('kick_done', { targetId: target, mode: result.mode });
     });
 
     // ── start_game ─────────────────────────────────────────────────────────
@@ -196,6 +230,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     // Hanya socket yang masih menjadi socket aktif pemain yang dihitung sebagai terputus.
     socket.on('disconnecting', (reason) => {
       debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms].filter(r => r !== socket.id) });
+      if (rm.markRestrictedDisconnected(userId, socket.id)) debugLog('RESTRICTED_PLAYER_DISCONNECTED', { userId, socketId: socket.id });
       for (const roomCode of socket.rooms) {
         if (roomCode === socket.id) continue;
         const changed = rm.markDisconnected(roomCode, userId, socket.id);
@@ -221,6 +256,12 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     const userId = socket.user.id;
     const r = rm.resumeSession(userId, socket.id, Date.now(), hintCode);
     if (r.events?.length) broadcastRoomEvents(r.events);
+
+    if (r.ok && r.restricted) {   // di-Kick dari Result: tetap di Result, tanpa bergabung ke socket-room mana pun
+      socket.emit('session_restored', r.state);
+      debugLog('SESSION_RESTORED_RESTRICTED', { userId, roomCode: r.state.code, socketId: socket.id, wasDisconnected: r.wasDisconnected });
+      return;
+    }
 
     if (!r.ok) {
       if (r.error !== 'NO_ROOM') debugLog('SESSION_RESUME_REJECTED', { userId, socketId: socket.id, reason: r.error });
@@ -262,7 +303,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     for (const e of events) {
       debugLog(`ROOM_${e.type.toUpperCase()}`, e);
       if (e.type === 'room_deleted' || e.type === 'room_abandoned') clearTimer(e.code);
-      else touched.add(e.code);
+      else if (e.type !== 'restriction_expired') touched.add(e.code);
     }
     for (const code of touched) {
       const room = rm.getRoom(code);

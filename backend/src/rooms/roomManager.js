@@ -16,9 +16,18 @@ const REMOVAL_MEMORY_MS    = 10 * 60_000;  // berapa lama alasan "dikeluarkan" d
 // userId → { code, reason, at } — agar pemain yang kembali setelah dikeluarkan mendapat pesan yang jelas
 const removals = new Map();
 
+// userId → { code, setResult, connected, disconnectedAt, socketId, at }
+// Pemain yang di-Kick oleh Host saat berada di Result. Mereka dikeluarkan dari room.players (kursi bebas,
+// tidak menahan host) tetapi tetap boleh melihat hasil set (salinan setResult disimpan di sini) dan TIDAK boleh
+// kembali ke Room sebelum kembali ke Homepage (leave_room) atau terkena timeout disconnect yang sama
+// dengan pemain biasa (RECONNECT_WINDOW_MS). Disimpan di server agar refresh/reconnect tidak menghapusnya.
+const restrictions = new Map();
+
 // ─── Room creation & joining ─────────────────────────────────────────────────
 
 function createRoom(hostId, maxGames = 4) {
+  if (restrictions.has(hostId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
+  if (removals.get(hostId)?.reason === 'KICKED') removals.delete(hostId);
   const code = generateCode();
   const roomId = uuidv4();
 
@@ -47,6 +56,7 @@ function createRoom(hostId, maxGames = 4) {
 }
 
 function joinRoom(code, playerId) {
+  if (restrictions.has(playerId))                  return { ok: false, error: 'KICKED_FROM_ROOM' };
   const room = rooms.get(code);
   if (!room)                                       return { ok: false, error: 'ROOM_NOT_FOUND' };
   if (room.status === 'playing')                   return { ok: false, error: 'GAME_ALREADY_STARTED' };
@@ -57,6 +67,7 @@ function joinRoom(code, playerId) {
   // ada yang keluar): room kembali ke status waiting untuk set berikutnya.
   const reset = room.status === 'done' ? _resetRoomForNewSet(room) : false;
 
+  if (removals.get(playerId)?.reason === 'KICKED') removals.delete(playerId);   // Kick bukan blacklist: boleh bergabung lagi
   room.players.push({ id: playerId, connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
   return { ok: true, room, reset };
 }
@@ -253,6 +264,7 @@ function leaveRoom(code, playerId) {
  * berikutnya dari pemain lain hanya menandai mereka sudah kembali. Idempoten.
  */
 function returnToRoom(code, playerId) {
+  if (restrictions.has(playerId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
   const room = rooms.get(code);
   if (!room) return { ok: false, error: 'ROOM_NOT_FOUND' };
   const p = room.players.find(p => p.id === playerId);
@@ -271,6 +283,74 @@ function restoreView(room, playerId) {
   const me = room.players.find(p => p.id === playerId);
   if (me && me.inRoom === false && room.setResult) return 'result';
   return 'room';
+}
+
+/**
+ * Host mengeluarkan pemain (Kick). Semua validasi ada di sini (server adalah sumber kebenaran).
+ *  - hanya Host; tidak boleh mengeluarkan diri sendiri; tidak boleh saat game berlangsung;
+ *  - mode 'room'   : target ada di Room → dihapus dari room, boleh bergabung lagi (bukan ban);
+ *  - mode 'result' : target masih di Result (set selesai) → dihapus dari room tetapi tetap melihat hasil,
+ *                    dengan pembatasan sampai kembali ke Homepage (lihat `restrictions`).
+ */
+function kickPlayer(code, hostId, targetId, now = Date.now()) {
+  const room = rooms.get(code);
+  if (!room)                     return { ok: false, error: 'ROOM_NOT_FOUND' };
+  if (room.hostId !== hostId)    return { ok: false, error: 'NOT_HOST' };
+  if (hostId === targetId)       return { ok: false, error: 'CANNOT_KICK_SELF' };
+  if (room.status === 'playing') return { ok: false, error: 'GAME_IN_PROGRESS' };
+
+  const idx = room.players.findIndex(p => p.id === targetId);
+  if (idx === -1)                return { ok: false, error: 'TARGET_NOT_IN_ROOM' };
+  const target = room.players[idx];
+
+  const mode = room.setResult && (room.status === 'done' || target.inRoom === false) ? 'result' : 'room';
+  room.players.splice(idx, 1);
+
+  if (mode === 'result') {
+    restrictions.set(targetId, {
+      code,
+      maxGames: room.maxGames,
+      setResult: JSON.parse(JSON.stringify(room.setResult)),
+      connected: target.connected,
+      disconnectedAt: target.disconnectedAt,   // timeout disconnect yang sedang berjalan dilanjutkan, bukan diulang
+      socketId: target.socketId,
+      at: now,
+    });
+  } else {
+    removals.set(targetId, { code, reason: 'KICKED', at: now });   // pesan jelas bila target sedang offline lalu kembali
+  }
+  return { ok: true, room, mode, targetId };
+}
+
+const getRestriction = (userId) => restrictions.get(userId) || null;
+const clearRestriction = (userId) => restrictions.delete(userId);
+
+/** Snapshot yang dikirim ke klien yang dibatasi (refresh/reconnect): selalu menampilkan Result. */
+function restrictedState(userId) {
+  const r = restrictions.get(userId);
+  if (!r) return null;
+  return {
+    code: r.code, view: 'result', restricted: true, status: 'done', hostId: null, maxGames: r.maxGames,
+    players: [], setScores: r.setResult.setScores, gameHistory: r.setResult.gameHistory, game: null, setResult: r.setResult,
+  };
+}
+
+function markRestrictedDisconnected(userId, socketId = null, now = Date.now()) {
+  const r = restrictions.get(userId);
+  if (!r || !r.connected) return false;
+  if (socketId && r.socketId && r.socketId !== socketId) return false;   // socket lama yang telat putus
+  r.connected = false;
+  r.disconnectedAt = now;
+  return true;
+}
+
+/** Pembatasan berakhir dengan timeout disconnect yang sama seperti pemain biasa. */
+function _expireRestriction(userId, now) {
+  const r = restrictions.get(userId);
+  if (!r || r.connected || r.disconnectedAt == null || now - r.disconnectedAt <= RECONNECT_WINDOW_MS) return null;
+  restrictions.delete(userId);
+  removals.set(userId, { code: r.code, reason: 'EXPIRED', at: now });
+  return { type: 'restriction_expired', code: r.code, playerId: userId };
 }
 
 function markDisconnected(code, playerId, socketId = null, now = Date.now()) {
@@ -370,6 +450,10 @@ function sweepExpired(now = Date.now()) {
     }
     events.push(..._expireRoom(room, now));
   }
+  for (const userId of [...restrictions.keys()]) {
+    const ev = _expireRestriction(userId, now);
+    if (ev) events.push(ev);
+  }
   for (const [id, r] of removals) if (now - r.at > REMOVAL_MEMORY_MS) removals.delete(id);
   return events;
 }
@@ -380,6 +464,16 @@ function sweepExpired(now = Date.now()) {
  * socket baru ke keanggotaan yang sudah ada.
  */
 function resumeSession(userId, socketId, now = Date.now(), hintCode = null) {
+  // Pemain yang di-Kick dari Result: pembatasan tetap berlaku setelah refresh/reconnect selama belum timeout.
+  _expireRestriction(userId, now);
+  const restriction = restrictions.get(userId);
+  if (restriction) {
+    const wasDisconnected = !restriction.connected;
+    restriction.connected = true;
+    restriction.disconnectedAt = null;
+    restriction.socketId = socketId;
+    return { ok: true, restricted: true, state: restrictedState(userId), wasDisconnected, events: [] };
+  }
   const room = findRoomByPlayer(userId, hintCode);
   if (!room) {
     const rem = removals.get(userId);
@@ -444,6 +538,6 @@ function generateCode() {
 
 module.exports = {
   createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip,
-  leaveRoom, returnToRoom, restoreView, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
+  leaveRoom, returnToRoom, restoreView, kickPlayer, getRestriction, clearRestriction, restrictedState, markRestrictedDisconnected, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
   restartTurnClock, publicState, RECONNECT_WINDOW_MS,
 };

@@ -168,4 +168,79 @@ t('fixture server asli: view result → /result, setResult terisi, bukan /lobby'
   assert.equal(st().setResult.gameHistory.length, 4)
   assert.equal(st().roomInfo.players.filter(p => p.inRoom === false).length, 3)
 })
+
+// ── Host Kick (klien): event server → state/navigasi ────────────────────────────
+const resultState = { code: 'ABC123', status: 'done', hostId: 'u2', players: [{ id: 'u1', connected: true, inRoom: false }, { id: 'u2', connected: true, inRoom: false }], game: null, view: 'result', setResult: { rankings: [{ id: 'u1', totalScore: 1 }], setScores: {}, gameHistory: [{ gameNumber: 1, scores: [] }] } }
+t('Kick di Room: event "kicked" membersihkan state room, menampilkan pesan, kembali ke Menu Utama; tidak membatasi', () => {
+  s2.fire('session_restored', { ...resultState, status: 'waiting', view: 'room', setResult: null })
+  s2.fire('kicked', { roomCode: 'ABC123' })
+  assert.equal(st().roomCode, null); assert.equal(st().roomInfo, null); assert.equal(st().restricted, false)
+  assert.match(st().notice, /dikeluarkan dari room oleh Host/)
+  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
+  st().setNotice(null)
+})
+t('Kick di Result: hanya menandai pembatasan; tetap di Result, hasil tetap ada, TANPA notifikasi/modal/error/navigasi otomatis', () => {
+  s2.fire('session_restored', resultState)
+  const navBefore = navCalls.length
+  s2.fire('kicked_from_result', { roomCode: 'ABC123' })
+  assert.equal(st().restricted, true)
+  assert.equal(st().restrictedModalOpen, false); assert.equal(st().notice, null); assert.equal(st().error, null)
+  assert.equal(navCalls.length, navBefore, 'tidak boleh ada navigasi')
+  assert.equal(st().setResult.gameHistory.length, 1); assert.equal(st().roomCode, 'ABC123')
+})
+t('Back to Room ditolak server (KICKED_FROM_ROOM) → modal terbuka, bukan pesan error; menekan lagi membukanya lagi', () => {
+  st().closeRestrictedModal()
+  s2.fire('return_room_error', { code: 'KICKED_FROM_ROOM' })
+  assert.equal(st().restrictedModalOpen, true); assert.equal(st().error, null); assert.equal(st().restricted, true)
+  assert.equal(st().events[0].code, 'KICKED_FROM_ROOM')
+  st().closeRestrictedModal(); assert.equal(st().restrictedModalOpen, false)
+  s2.fire('return_room_error', { code: 'KICKED_FROM_ROOM' }); assert.equal(st().restrictedModalOpen, true)
+  st().closeRestrictedModal()
+})
+t('error return_to_room lain tetap pesan biasa dan tidak membuka modal', () => {
+  s2.fire('return_room_error', { code: 'GAME_IN_PROGRESS' })
+  assert.equal(st().restrictedModalOpen, false); assert.match(st().error, /Gagal kembali ke room/)
+  st().clearError()
+})
+t('refresh/reconnect saat dibatasi: session_restored(restricted) → /result, pembatasan tetap, modal TIDAK terbuka otomatis', () => {
+  st().openRestrictedModal()
+  s2.fire('session_restored', { code: 'ABC123', view: 'result', restricted: true, status: 'done', hostId: null, players: [], game: null, setResult: resultState.setResult })
+  assert.deepEqual(navCalls.at(-1), ['/result', { replace: true }])
+  assert.equal(st().restricted, true); assert.equal(st().restrictedModalOpen, false)
+  assert.equal(st().setResult.gameHistory.length, 1)
+})
+t('session_restored biasa (tidak dibatasi) mereset pembatasan', () => {
+  s2.fire('session_restored', resultState)
+  assert.equal(st().restricted, false)
+})
+t('kembali ke Homepage (room_left) mengakhiri pembatasan dan menutup modal', () => {
+  s2.fire('kicked_from_result', {}); st().openRestrictedModal()
+  s2.fire('room_left', { roomCode: 'ABC123', roomDeleted: false })
+  assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false); assert.equal(st().roomInfo, null)
+  assert.deepEqual(navCalls.at(-1), ['/lobby', undefined])
+})
+t('timeout disconnect: session_none (EXPIRED) mengakhiri pembatasan dan memulangkan ke Menu Utama', () => {
+  s2.fire('session_restored', resultState); s2.fire('kicked_from_result', {})
+  assert.equal(st().restricted, true)
+  window.location.pathname = '/result'                       // pemain sedang di halaman Result
+  s2.fire('session_none', { reason: 'EXPIRED' })
+  assert.equal(st().restricted, false); assert.equal(st().roomInfo, null); assert.match(st().notice, /terputus terlalu lama/)
+  assert.deepEqual(navCalls.at(-1), ['/lobby', { replace: true }])
+  window.location.pathname = '/lobby'; st().setNotice(null)
+})
+t('session_none (KICKED) setelah di-Kick saat offline menampilkan pesan yang jelas', () => {
+  s2.fire('session_none', { reason: 'KICKED' })
+  assert.match(st().notice, /dikeluarkan dari room oleh Host/)
+  st().setNotice(null)
+})
+t('kick_error → pesan error yang ramah (bukan kode mentah)', () => {
+  s2.fire('kick_error', { code: 'NOT_HOST' }); assert.match(st().error, /Hanya Host/)
+  s2.fire('kick_error', { code: 'GAME_IN_PROGRESS' }); assert.match(st().error, /pertandingan berlangsung/)
+  st().clearError()
+})
+t('logout membersihkan pembatasan; listener Kick tidak ganda', () => {
+  st().setRestricted(true); st().openRestrictedModal(); st().logout()
+  assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false)
+  for (const ev of ['kicked', 'kicked_from_result', 'kick_error', 'return_room_error']) assert.equal(s2.listeners[ev].length, 1, ev)
+})
 console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)

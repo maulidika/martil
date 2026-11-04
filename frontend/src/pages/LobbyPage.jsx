@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useGameStore } from '../store/gameStore'
 import { emitSocket } from '../hooks/useSocket'
+import Modal from '../components/Modal'
+import { canShowKick, kickConfirmText } from '../utils/kick'
 
 const C = { bg:'#1a1a2e', card:'#16213e', accent:'#e94560', muted:'#888', border:'#1a4a7a', text:'#eee', green:'#2ecc71', yellow:'#f39c12' }
 
@@ -27,7 +29,8 @@ const s = {
 
 export default function LobbyPage() {
   const navigate  = useNavigate()
-  const { user, token, roomCode, roomInfo, logout, events, setResult } = useGameStore()
+  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted } = useGameStore()
+  const [kickTarget, setKickTarget] = useState(null)   // id pemain yang menunggu konfirmasi Kick
   const [joinInput, setJoinInput] = useState('')
   const [maxGames, setMaxGames]   = useState(4)
   const [localErr, setLocalErr]   = useState('')
@@ -50,10 +53,11 @@ export default function LobbyPage() {
   // (mis. refresh): dipulangkan ke /result dengan hasil dari server.
   const me = players.find(p => p.id === user?.id)
   const mustBeOnScoreboard = !!(myRoom && me && me.inRoom === false && (setResult || myRoom.setResult))
+    || !!(restricted && setResult)   // di-Kick dari Result: tempatnya di Result sampai kembali ke Homepage
   useEffect(() => {
     if (!mustBeOnScoreboard) return
-    const result = setResult || myRoom.setResult
-    console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom.code })
+    const result = setResult || myRoom?.setResult
+    console.info(`[MARTIL ${new Date().toISOString()}] NOT_RETURNED_REDIRECT_TO_RESULT`, { roomCode: myRoom?.code })
     if (!setResult) useGameStore.getState().setSetResult(result)
     navigate('/result', { replace: true })
   }, [mustBeOnScoreboard])
@@ -187,6 +191,12 @@ export default function LobbyPage() {
                   <span style={{ display:'flex', gap:8, alignItems:'center' }}>
                     {p && p.inRoom === false && <span style={{ fontSize:11, color:C.muted }}>belum kembali</span>}
                     {p?.id === myRoom.hostId && <span style={{ fontSize:11, color:C.yellow }}>Host</span>}
+                    {p && canShowKick({ myId: user?.id, hostId: myRoom.hostId, targetId: p.id, players, status: myRoom.status }) && (
+                      <button
+                        onClick={() => setKickTarget(p.id)}
+                        style={{ padding:'2px 8px', fontSize:11, fontWeight:600, borderRadius:6, background:'transparent', color:C.accent, border:`1px solid ${C.accent}`, cursor:'pointer' }}
+                      >Kick</button>
+                    )}
                   </span>
                 </div>
               )
@@ -218,6 +228,24 @@ export default function LobbyPage() {
             {exiting ? 'Keluar dari room…' : 'Exit Room'}
           </button>
         </div>
+      )}
+
+      {kickTarget && (
+        <Modal
+          testId="kick-confirm"
+          title="Kick pemain?"
+          onEscape={() => setKickTarget(null)}
+          actions={[
+            { label: 'Batal', onClick: () => setKickTarget(null) },
+            { label: 'Kick', primary: true, onClick: () => {
+                const target = kickTarget
+                setKickTarget(null)
+                if (!emitSocket('kick_player', { roomCode, targetId: target })) setLocalErr('Koneksi ke server terputus. Tunggu tersambung sebelum mengeluarkan pemain.')
+              } },
+          ]}
+        >
+          {kickConfirmText(kickTarget.slice(0, 8), players.find(p => p.id === kickTarget)?.inRoom === false)}
+        </Modal>
       )}
 
       {/* Rules quick reference */}
