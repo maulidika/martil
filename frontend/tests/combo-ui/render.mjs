@@ -21,12 +21,12 @@ const ts = req(tsPath), { renderToString } = req(serverPath), React = req(reactP
 // ── lingkungan browser palsu ──
 const ss = new Map(); const fakeStore = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
 globalThis.sessionStorage = fakeStore; globalThis.localStorage = fakeStore
-const setWidth = (w) => { globalThis.window = { innerWidth: w, addEventListener() {}, removeEventListener() {}, location: { pathname: '/game' } } }
+const setWidth = (w, h = w < 720 ? 800 : 700) => { globalThis.window = { innerWidth: w, innerHeight: h, addEventListener() {}, removeEventListener() {}, location: { pathname: '/game' } } }
 const origErr = console.error; console.error = (...a) => { if (!String(a[0]).includes('useLayoutEffect does nothing on the server')) origErr(...a) }
 
 // ── bangun modul uji: transpile JSX → ESM, arahkan impor ke stub ──
 const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'martil-render-'))
-fs.mkdirSync(path.join(OUT, 'pages')); fs.mkdirSync(path.join(OUT, 'utils')); fs.mkdirSync(path.join(OUT, 'store')); fs.mkdirSync(path.join(OUT, 'stubs'))
+for (const d of ['pages', 'utils', 'store', 'stubs', 'components', 'components/game']) fs.mkdirSync(path.join(OUT, d), { recursive: true })
 fs.writeFileSync(path.join(OUT, 'stubs/zustand.mjs'), `
 export function create(init) {
   let state; const set = (p) => { state = { ...state, ...(typeof p === 'function' ? p(state) : p) } }; const get = () => state
@@ -46,9 +46,10 @@ const fix = (prefix) => (spec) => ({
   react: map.react, 'react-router-dom': `${prefix}stubs/router.mjs`, zustand: `${prefix}stubs/zustand.mjs`,
   '../store/gameStore': '../store/gameStore.mjs', '../hooks/useSocket': `${prefix}stubs/socket.mjs`,
   '../components/GameSyncWaiting': `${prefix}stubs/waiting.mjs`,
-}[spec] ?? (spec.startsWith('../utils/') ? spec + '.mjs' : spec.startsWith('./') ? spec + '.mjs' : spec))
+}[spec] ?? (spec.startsWith('.') ? spec + '.mjs' : spec))
 build('store/gameStore.js', 'store/gameStore.mjs', fix('../'))
-for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
+for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session', 'gameLayout', 'profile']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
+build('components/game/ui.jsx', 'components/game/ui.mjs', fix('../../'))
 build('pages/GamePage.jsx', 'pages/GamePage.mjs', fix('../'))
 const { useGameStore: store } = await import(pathToFileURL(path.join(OUT, 'store/gameStore.mjs')).href)
 const GamePage = (await import(pathToFileURL(path.join(OUT, 'pages/GamePage.mjs')).href)).default
@@ -58,18 +59,21 @@ let pass = 0, fail = 0
 const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
 const mk = (id) => ({ id, rank: id.slice(0, -1), suit: id.slice(-1) })
 const HAND = ['3D','3C','4H','5D','6C','9S','JS','2D']
-function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND } = {}) {
+function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND, opp = [{ id: 'p2', cardCount: 13 }], players, bet, turn, scores = {}, offline = [] } = {}) {
   setWidth(width)
   const me = 'me'
+  const current = turn ?? (myTurn ? me : 'p2')
   store.setState({
-    user: { id: me }, roomCode: 'ROOM', roomInfo: { code: 'ROOM', maxGames: 4, setScores: {} }, connected,
-    selectedIds: selected, events: [], currentTurn: myTurn ? me : 'p2',
-    gameState: { gameNumber: 1, myHand: hand.map(mk), opponents: [{ id: 'p2', cardCount: 13 }], currentTurn: myTurn ? me : 'p2', timeLeft: 30000, table },
+    user: { id: me, username: 'Syamil_Jumaries' }, roomCode: 'ROOM', connected,
+    roomInfo: { code: 'ROOM', maxGames: 4, setScores: scores, ...(bet !== undefined ? { bet } : {}),
+                players: players || [me, ...opp.map(o => o.id)].map(id => ({ id, connected: !offline.includes(id), inRoom: true })) },
+    selectedIds: selected, events: [], currentTurn: current,
+    gameState: { gameNumber: 1, myHand: hand.map(mk), opponents: opp, currentTurn: current, timeLeft: 30000, table },
   })
   const html = renderToString(React.createElement(GamePage)).replace(/<!-- -->/g, '')
-  const buttons = [...html.matchAll(/<button([^>]*)>([^<]*)<\/button>/g)].map(m => ({ label: m[2].trim(), disabled: /disabled=""/.test(m[1]) }))
+  const buttons = [...html.matchAll(/<button([^>]*)>(.*?)<\/button>/g)].map(m => ({ label: m[2].replace(/<[^>]*>/g, '').trim(), disabled: /disabled=""/.test(m[1]) }))
   const btn = (label) => buttons.find(b => b.label === label || b.label.startsWith(label + ' '))
-  return { html, buttons, btn, raised: (html.match(/translateY\(-14px\)/g) || []).length }
+  return { html, buttons, btn, raised: (html.match(/translateY\(-\d+px\)/g) || []).length }
 }
 const tableOf = (ids, pid = 'p2') => { const cards = ids.map(mk); return [{ playerId: pid, combo: { type: ids.length === 2 ? 'pair' : 'single', cards } }] }
 
@@ -116,4 +120,67 @@ t('layar sempit: Combo Detector pindah ke atas dek, CLEAR di kiri bawah, kontrol
 t('tidak terhubung: PLAY & SKIP nonaktif', () => {
   const r = render({ connected: false, selected: ['3D', '3C'] }); assert.equal(r.btn('PLAY').disabled, true); assert.equal(r.btn('SKIP').disabled, true)
 })
+// ── Redesign: kursi, taruhan, profil ──
+const seatOrder = (html) => [...html.matchAll(/data-seat="(\w+)"/g)].map(m => m[1])
+const OPP3 = [{ id: 'aaaa1111', cardCount: 13 }, { id: 'bbbb2222', cardCount: 9 }, { id: 'cccc3333', cardCount: 4 }]
+t('Redesign: 3 lawan duduk kiri/atas/kanan, pemain utama di bawah; tiap kursi menampilkan nama dan jumlah kartu', () => {
+  const html = render({ opp: OPP3 }).html
+  assert.deepEqual(seatOrder(html), ['left', 'top', 'right', 'me'])
+  for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
+  for (const n of ['13', '9', '4']) assert.ok(html.includes(`aria-label="${n} kartu"`), `tumpukan kartu ${n} tidak ada`)
+  assert.ok(html.includes('Syamil_Jumaries')); assert.ok(html.includes('aria-label="sisa kartu"'))
+})
+t('Redesign: tata letak proporsional untuk 2 dan 1 lawan', () => {
+  assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 2) }).html), ['left', 'right', 'me'])
+  assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 1) }).html), ['top', 'me'])
+})
+t('Redesign: urutan duduk mengikuti urutan giliran (pemain setelah saya di kiri)', () => {
+  const players = ['aaaa1111', 'me', 'bbbb2222', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
+  const html = render({ opp: OPP3, players }).html
+  const marks = [...html.matchAll(/data-seat="(\w+)"/g)].map(m => ({ side: m[1], i: m.index }))
+  const at = (side) => { const k = marks.findIndex(m => m.side === side); const seg = html.slice(marks[k].i, marks[k + 1]?.i ?? html.length); return OPP3.map(o => o.id).find(id => seg.includes(id.slice(0, 8))) }
+  assert.equal(at('left'), 'bbbb2222'); assert.equal(at('top'), 'cccc3333'); assert.equal(at('right'), 'aaaa1111')
+})
+t('Redesign: cincin timer hanya pada pemain yang sedang giliran', () => {
+  const mine = render({ opp: OPP3, turn: 'me' }).html, theirs = render({ opp: OPP3, turn: 'bbbb2222' }).html
+  assert.equal((mine.match(/conic-gradient/g) || []).length, 1); assert.equal((theirs.match(/conic-gradient/g) || []).length, 1)
+  const seatI = theirs.indexOf('data-seat="top"'), meI = theirs.indexOf('data-seat="me"')
+  assert.ok(theirs.slice(seatI, meI).includes('conic-gradient'), 'cincin ada di kursi lawan yang giliran'); assert.ok(!theirs.slice(meI).includes('conic-gradient'))
+  assert.ok(!mine.slice(0, mine.indexOf('data-seat="me"')).includes('conic-gradient'))
+})
+t('Redesign: pemain lawan terputus ditandai; skor set tampil di kursi', () => {
+  const html = render({ opp: OPP3, offline: ['cccc3333'], scores: { me: 12, aaaa1111: -4 } }).html
+  assert.ok(html.includes('terputus')); assert.ok(html.includes('12pt')); assert.ok(html.includes('-4pt'))
+})
+t('Redesign: taruhan di kiri bawah mengikuti data Room (tidak di-hardcode); placeholder bila belum ada', () => {
+  const betText = (html) => (html.match(/data-testid="bet"[^>]*>.*?<span>(.*?)<\/span>/) || [])[1]
+  assert.equal(betText(render().html), '—')                          // belum ada sistem taruhan → placeholder
+  assert.equal(betText(render({ bet: 5000 }).html), '5K')
+  assert.equal(betText(render({ bet: 10000 }).html), '10K')
+  assert.equal(betText(render({ bet: '25K' }).html), '25K')
+  const html = render({ bet: 5000 }).html
+  assert.ok(html.indexOf('data-testid="bet"') > html.indexOf('data-testid="detector"'))      // di kolom kiri, di bawah Combo Detector
+  assert.ok(html.indexOf('data-testid="bet"') > html.indexOf('>CLEAR<'))
+})
+t('Redesign: taruhan terpisah dari koin pemain (koin profil tidak berubah saat taruhan berubah)', () => {
+  const coins = (h) => [...h.matchAll(/(\d+(?:,\d+)?[KMB])<\/span>/g)].map(m => m[1]).filter(x => x !== '5K' && x !== '10K')
+  assert.deepEqual(coins(render({ bet: 5000 }).html), coins(render({ bet: 10000 }).html))
+})
+t('Redesign: kartu di meja tampil dengan label kombinasi dan nama pemain', () => {
+  const html = render({ table: [{ playerId: 'p2', combo: { type: 'pair', cards: ['5D', '5H'].map(mk) } }] }).html
+  assert.ok(html.includes('Pair')); assert.ok(html.includes('oleh '))
+  assert.ok(render({ myTurn: true }).html.includes('Meja kosong'))
+})
+t('Redesign: profil memiliki avatar, level (placeholder) dan koin (dummy) untuk setiap pemain', () => {
+  const html = render({ opp: OPP3 }).html
+  assert.equal((html.match(/Lv\./g) || []).length, 4)                // 3 lawan + saya
+  assert.ok((html.match(/<svg/g) || []).length >= 5)                  // avatar siluet tiap pemain (+ watermark)
+})
+t('Redesign: layar sempit menampilkan seluruh kursi, kontrol, dan umpan balik seleksi', () => {
+  const r = render({ width: 390, opp: OPP3, selected: ['3D', '4H'] })
+  assert.deepEqual(seatOrder(r.html), ['left', 'top', 'right', 'me'])
+  assert.ok(r.html.includes('Kombinasi tidak valid'))
+  for (const l of ['SKIP', 'PLAY', 'CLEAR']) assert.ok(r.btn(l))
+})
+
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
