@@ -19,13 +19,15 @@ const SUITS = ['D','C','H','S'];
 const deck = RANKS.flatMap(r => SUITS.map(s => ({ rank: r, suit: s, id: r + s })));
 const pick = (ids) => ids.map(id => deck.find(c => c.id === id));
 
+const { pathToFileURL } = require('node:url');
+
 (async () => {
-  // comboDetector.js adalah ES module; salin sebagai .mjs agar bisa di-import dari CommonJS.
   const tmp = path.join(os.tmpdir(), `martil-combo-${process.pid}.mjs`);
   fs.copyFileSync(CLIENT_SRC, tmp);
-  const client = await import(tmp);
-  fs.unlinkSync(tmp);
 
+  const client = await import(pathToFileURL(tmp).href);
+
+  fs.unlinkSync(tmp);
   const kind = (x) => (x ? (x.subtype || x.type) : null);
 
   // 1) Kasus yang dilaporkan: straight dengan 2 sebagai kartu rendah
