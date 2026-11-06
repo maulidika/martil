@@ -41,6 +41,9 @@ function createRoom(hostId, maxGames = 4) {
     setId: null,
     setScores: {},
     currentGame: null,
+    // true from the moment a game ends until the next one is announced (`game_started`).
+    // The next game's state already exists during this ~5 s gap, but nobody may act on it yet.
+    intermission: false,
     gameHistory: [],
     setResult: null,   // hasil set terakhir (dipertahankan sampai set baru dimulai)
   };
@@ -85,6 +88,7 @@ function _resetRoomForNewSet(room) {
   room.setScores   = {};
   room.gameHistory = [];
   room.currentGame = null;
+  room.intermission = false;
   db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('waiting', room.id);
   return true;
 }
@@ -110,6 +114,7 @@ function startSet(code) {
   room.setScores = Object.fromEntries(playerIds.map(id => [id, 0]));
   room.gameHistory = [];
   room.setResult   = null;
+  room.intermission = false;
   room.currentGame = GameEngine.initGame(playerIds, 1, null);
 
   db().prepare('INSERT INTO sets (id, room_id) VALUES (?, ?)').run(setId, room.id);
@@ -121,6 +126,7 @@ function startSet(code) {
 function processPlay(code, playerId, cardIds) {
   const room = rooms.get(code);
   if (!room || !room.currentGame) return { ok: false, error: 'NO_ACTIVE_GAME' };
+  if (room.intermission)          return { ok: false, error: 'GAME_STARTING' };
 
   const result = GameEngine.processPlay(room.currentGame, playerId, cardIds);
   if (!result.ok) return result;
@@ -137,6 +143,7 @@ function processPlay(code, playerId, cardIds) {
 function processSkip(code, playerId) {
   const room = rooms.get(code);
   if (!room || !room.currentGame) return { ok: false, error: 'NO_ACTIVE_GAME' };
+  if (room.intermission)          return { ok: false, error: 'GAME_STARTING' };
 
   const result = GameEngine.processSkip(room.currentGame, playerId);
   if (!result.ok) return result;
@@ -148,6 +155,7 @@ function processSkip(code, playerId) {
 function processAutoSkip(code) {
   const room = rooms.get(code);
   if (!room || !room.currentGame) return null;
+  if (room.intermission)          return null;   // no turn clock runs during the gap
 
   const result = GameEngine.processAutoSkip(room.currentGame);
   if (!result.ok) return null;
@@ -214,6 +222,7 @@ function _handleGameOver(room, event) {
       nextNum,
       event.winnerId,
     );
+    room.intermission = true;   // released by endIntermission() when `game_started` is sent
     event.nextGame  = nextNum;
     event.nextFirst = event.winnerId;
   }
@@ -506,6 +515,18 @@ function restartTurnClock(code) {
   if (room?.currentGame) room.currentGame.turnStartedAt = Date.now();
 }
 
+/**
+ * End the gap between two games: the next game becomes playable and its turn clock starts now.
+ * @returns {object|null} the room, or null when there is nothing to release (room gone, set over, or no gap active).
+ */
+function endIntermission(code) {
+  const room = rooms.get(code);
+  if (!room?.currentGame || !room.intermission) return null;
+  room.intermission = false;
+  restartTurnClock(code);
+  return room;
+}
+
 // ─── Public view ─────────────────────────────────────────────────────────────
 
 function publicState(code, forPlayerId) {
@@ -537,7 +558,7 @@ function generateCode() {
 }
 
 module.exports = {
-  createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip,
+  createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip, endIntermission,
   leaveRoom, returnToRoom, restoreView, kickPlayer, getRestriction, clearRestriction, restrictedState, markRestrictedDisconnected, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
   restartTurnClock, publicState, RECONNECT_WINDOW_MS,
 };

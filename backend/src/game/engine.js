@@ -3,6 +3,7 @@
 const { deal, findFirstPlayer, sortHand } = require('./deck');
 const { detectCombo, canBeat, cardsInHand } = require('./validator');
 const { calcGameScores } = require('./scorer');
+const { validateCardIds } = require('./cardIds');
 
 const TURN_TIMEOUT_MS = 30_000;
 
@@ -44,7 +45,8 @@ class GameEngine {
   static processPlay(state, playerId, cardIds) {
     if (state.phase !== 'playing')          return err('GAME_NOT_ACTIVE');
     if (state.currentTurn !== playerId)      return err('NOT_YOUR_TURN');
-    if (!cardIds || cardIds.length === 0)    return err('NO_CARDS_SELECTED');
+    const idsError = validateCardIds(cardIds);
+    if (idsError)                            return err(idsError);
 
     const hand = state.hands[playerId];
     const playedCards = cardIds.map(id => hand.find(c => c.id === id)).filter(Boolean);

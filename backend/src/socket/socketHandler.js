@@ -3,11 +3,29 @@
 const { verifyToken } = require('../auth/jwt');
 const rm = require('../rooms/roomManager');
 const { TURN_TIMEOUT_MS } = require('../game/engine');
+const { readPayload, emitRejection } = require('./payload');
 
 const timers = new Map(); // roomCode → timeoutHandle
 
 function debugLog(action, details = {}) {
   console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details);
+}
+
+/**
+ * Register an event handler that can never throw into Socket.IO. Payload guards (readPayload)
+ * handle the expected bad input; this is the safety net for anything unexpected: the error is
+ * logged with its stack and the sender gets INTERNAL_ERROR, while the server keeps running.
+ */
+function onSafe(socket, event, handler, { notify = true } = {}) {
+  socket.on(event, (...args) => {
+    try {
+      handler(...args);
+    } catch (err) {
+      debugLog('HANDLER_ERROR', { event, userId: socket.user?.id, message: err?.message });
+      console.error(err?.stack || err);
+      if (notify) emitRejection(socket, event, 'INTERNAL_ERROR');
+    }
+  });
 }
 
 const SWEEP_INTERVAL_MS = 10_000;
@@ -32,7 +50,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     debugLog('SOCKET_CONNECTED', { socketId: socket.id, userId });
 
     // ── create_room ────────────────────────────────────────────────────────
-    socket.on('create_room', ({ maxGames = 4 } = {}) => {
+    onSafe(socket, 'create_room', (data) => {
+      const payload = readPayload(data, [], { allowEmpty: true });
+      if (!payload) return emitRejection(socket, 'create_room', 'INVALID_PAYLOAD');
+      const { maxGames = 4 } = payload;
       const result = rm.createRoom(userId, maxGames);
       if (!result.ok) return socket.emit('error', { code: result.error });
 
@@ -43,7 +64,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     });
 
     // ── join_room ──────────────────────────────────────────────────────────
-    socket.on('join_room', ({ roomCode }) => {
+    onSafe(socket, 'join_room', (data) => {
+      const payload = readPayload(data, ['roomCode']);
+      if (!payload) return emitRejection(socket, 'join_room', 'INVALID_PAYLOAD');
+      const { roomCode } = payload;
       const room = rm.getRoom(roomCode);
       if (!room) return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
 
@@ -67,13 +91,16 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
 
     // ── resume_session ─────────────────────────────────────────────────────
     // Dikirim klien setiap kali socket tersambung (login, refresh, atau reconnect).
-    socket.on('resume_session', () => resumeFor(socket));
+    onSafe(socket, 'resume_session', () => resumeFor(socket));
 
     // ── leave_room ─────────────────────────────────────────────────────────
     // Keluar dari room dengan sengaja ("Exit Room" di Room, "Back to Menu Utama" di Scoreboard).
     // Diizinkan saat status waiting/done. Hanya socket pemain ini yang keluar dari room;
     // pemain lain tidak terpengaruh.
-    socket.on('leave_room', ({ roomCode } = {}) => {
+    onSafe(socket, 'leave_room', (data) => {
+      const payload = readPayload(data, ['roomCode']);
+      if (!payload) return emitRejection(socket, 'leave_room', 'INVALID_PAYLOAD');
+      const { roomCode } = payload;
       const code = String(roomCode || '').toUpperCase();
       debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
       // Pemain yang di-Kick dari Result: kembali ke Homepage mengakhiri pembatasan.
@@ -110,7 +137,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
 
     // ── return_to_room ─────────────────────────────────────────────────────
     // "Back to Room" di Scoreboard: tetap menjadi anggota room, state set lama dibersihkan.
-    socket.on('return_to_room', ({ roomCode } = {}) => {
+    onSafe(socket, 'return_to_room', (data) => {
+      const payload = readPayload(data, ['roomCode']);
+      if (!payload) return emitRejection(socket, 'return_to_room', 'INVALID_PAYLOAD');
+      const { roomCode } = payload;
       const code = String(roomCode || '').toUpperCase();
       debugLog('RETURN_TO_ROOM_REQUEST', { userId, roomCode: code });
       if (rm.getRestriction(userId)) {   // di-Kick dari Result: tidak boleh kembali ke Room sebelum ke Homepage
@@ -140,7 +170,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
 
     // ── kick_player ────────────────────────────────────────────────────────
     // Hanya Host, hanya saat game tidak berlangsung. Semua validasi di roomManager.kickPlayer.
-    socket.on('kick_player', ({ roomCode, targetId } = {}) => {
+    onSafe(socket, 'kick_player', (data) => {
+      const payload = readPayload(data, ['roomCode', 'targetId']);
+      if (!payload) return emitRejection(socket, 'kick_player', 'INVALID_PAYLOAD');
+      const { roomCode, targetId } = payload;
       const code = String(roomCode || '').toUpperCase();
       const target = String(targetId || '');
       if (!socket.rooms.has(code)) return socket.emit('kick_error', { code: 'NOT_IN_ROOM' });
@@ -162,7 +195,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     });
 
     // ── start_game ─────────────────────────────────────────────────────────
-    socket.on('start_game', ({ roomCode }) => {
+    onSafe(socket, 'start_game', (data) => {
+      const payload = readPayload(data, ['roomCode']);
+      if (!payload) return emitRejection(socket, 'start_game', 'INVALID_PAYLOAD');
+      const { roomCode } = payload;
       if (!requireInRoom(socket, roomCode)) return;
       const room = rm.getRoom(roomCode);
       if (!room)                   return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
@@ -181,15 +217,16 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     });
 
     // ── play_cards ─────────────────────────────────────────────────────────
-    socket.on('play_cards', ({ roomCode, cardIds }) => {
+    onSafe(socket, 'play_cards', (data) => {
+      const payload = readPayload(data, ['roomCode']);
+      if (!payload) return emitRejection(socket, 'play_cards', 'INVALID_PAYLOAD');
+      const { roomCode, cardIds } = payload;   // cardIds: shape is validated by the engine (game/cardIds.js)
       if (!requireInRoom(socket, roomCode)) return;
-      clearTimer(roomCode);
 
+      // Validate first: a rejected action must leave the turn timer exactly as it was.
       const result = rm.processPlay(roomCode, userId, cardIds);
-      if (!result.ok) {
-        startTimer(io, roomCode); // restart timer even on error
-        return socket.emit('error', { code: result.error });
-      }
+      if (!result.ok) return socket.emit('error', { code: result.error });
+      clearTimer(roomCode);   // accepted: the turn is over, the next branch starts a fresh timer (or none)
 
       const { event, room } = result;
       io.to(roomCode).emit('cards_played', { playerId: userId, combo: event.combo });
@@ -204,15 +241,16 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     });
 
     // ── skip_turn ──────────────────────────────────────────────────────────
-    socket.on('skip_turn', ({ roomCode }) => {
+    onSafe(socket, 'skip_turn', (data) => {
+      const payload = readPayload(data, ['roomCode']);
+      if (!payload) return emitRejection(socket, 'skip_turn', 'INVALID_PAYLOAD');
+      const { roomCode } = payload;
       if (!requireInRoom(socket, roomCode)) return;
-      clearTimer(roomCode);
 
+      // Validate first: a rejected action must leave the turn timer exactly as it was.
       const result = rm.processSkip(roomCode, userId);
-      if (!result.ok) {
-        startTimer(io, roomCode);
-        return socket.emit('error', { code: result.error });
-      }
+      if (!result.ok) return socket.emit('error', { code: result.error });
+      clearTimer(roomCode);
 
       const { event, room } = result;
       io.to(roomCode).emit('player_skipped', { playerId: userId });
@@ -228,7 +266,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
 
     // ── disconnect ─────────────────────────────────────────────────────────
     // Hanya socket yang masih menjadi socket aktif pemain yang dihitung sebagai terputus.
-    socket.on('disconnecting', (reason) => {
+    onSafe(socket, 'disconnecting', (reason) => {
       debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms].filter(r => r !== socket.id) });
       if (rm.markRestrictedDisconnected(userId, socket.id)) debugLog('RESTRICTED_PLAYER_DISCONNECTED', { userId, socketId: socket.id });
       for (const roomCode of socket.rooms) {
@@ -241,7 +279,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
           debugLog('DISCONNECT_IGNORED', { roomCode, userId, socketId: socket.id, why: 'socket sudah digantikan atau pemain sudah terputus' });
         }
       }
-    });
+    }, { notify: false });   // the socket is already closing: nobody to tell
   });
 
   // ── Session resume ─────────────────────────────────────────────────────────
@@ -382,9 +420,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       });
     } else {
       setTimeout(() => {
-        const fresh = rm.getRoom(roomCode);
-        if (!fresh?.currentGame) return;
-        rm.restartTurnClock(roomCode); // timeLeft yang dikirim harus sama dengan timer server (30 dtk penuh)
+        // Releases the gap (plays/skips are rejected with GAME_STARTING until now) and restarts the
+        // turn clock so the timeLeft we send matches the server timer (full 30 s).
+        const fresh = rm.endIntermission(roomCode);
+        if (!fresh) return;
         emitPrivateStates(io, roomCode, fresh);
         io.to(roomCode).emit('game_started', {
           gameNumber:  event.nextGame,

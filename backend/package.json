@@ -10,7 +10,11 @@
     "test:sim": "node tests/reconnect.sim.js",
     "test:combo": "node tests/combo.consistency.js",
     "test:nav": "node tests/room-navigation.sim.js",
-    "test:kick": "node tests/kick.sim.js"
+    "test:kick": "node tests/kick.sim.js",
+    "test:cardids": "node tests/card-ids.sim.js",
+    "test:payload": "node tests/payload-guards.sim.js",
+    "test:timer": "node tests/turn-timer.sim.js",
+    "test:intermission": "node tests/intermission.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

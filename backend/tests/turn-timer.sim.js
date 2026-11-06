@@ -1,0 +1,172 @@
+'use strict';
+/**
+ * H3 — a rejected action must not touch the turn timer (real socketHandler.js + roomManager.js + engine.js,
+ * fake Socket.IO, and a spy on setTimeout/clearTimeout for the 30 s turn timer).
+ *   npm run test:timer      (from the backend folder)
+ *
+ * Before the fix, play_cards / skip_turn cleared the timer BEFORE validating and restarted a full 30 s timer
+ * when the action was rejected. Any room member could therefore keep the current player's turn alive forever
+ * by sending rejected actions, and the server timer drifted away from the engine's `turnStartedAt`.
+ *
+ * Covered:
+ *   - rejected actions (not your turn, invalid combo, bad ids, no cards) leave the SAME timer pending and un-fired
+ *   - accepted play / skip swap in exactly one fresh timer; the old one is cleared
+ *   - a play that ends a game leaves no turn timer pending
+ *   - the original deadline still auto-skips after any number of rejected actions
+ */
+const path = require('path');
+const { TURN_TIMEOUT_MS } = require(path.join('..', 'src', 'game', 'engine.js'));
+
+// Spy installed BEFORE the sim helper loads, so the helper's own setTimeout wrapper sits on top of it.
+const turnTimers = [];                       // every 30 s timer ever created: { fn, cleared, fired }
+const realSetTimeout = global.setTimeout;
+const realClearTimeout = global.clearTimeout;
+global.setTimeout = (fn, ms, ...args) => {
+  if (ms !== TURN_TIMEOUT_MS) return realSetTimeout(fn, ms, ...args);
+  const t = { fn, cleared: false, fired: false };
+  turnTimers.push(t);
+  return t;
+};
+global.clearTimeout = (h) => {
+  if (h && typeof h === 'object' && 'fn' in h) { h.cleared = true; return; }
+  return realClearTimeout(h);
+};
+const pending = () => turnTimers.filter(t => !t.cleared && !t.fired);
+const fire = (t) => { t.fired = true; t.fn(); };
+
+const { assert, rm, setup, newRoom, runTests, tick } = require('./helpers/sim');
+const { createDeck } = require(path.join('..', 'src', 'game', 'deck.js'));
+
+const tests = [];
+const test = (name, fn) => tests.push({ name, fn });
+
+/** Fresh started game; returns handy handles. Resets the spy log first. */
+function liveGame() {
+  turnTimers.length = 0;
+  const env = setup();
+  const room = newRoom(env.io, 4, { start: true });
+  const game = () => rm.getRoom(room.code).currentGame;
+  const clientOf = (id) => room.clients[room.users.indexOf(id)];
+  const cur = () => clientOf(game().currentTurn);
+  const other = () => room.clients[(room.users.indexOf(game().currentTurn) + 1) % 4];
+  return { ...env, ...room, game, cur, other, clientOf };
+}
+const codeOf = (c) => c.last('error')?.code;
+const send = (c, ev, data) => { c.clear(); c.emit(ev, data); };
+
+// ── Baseline sanity ──────────────────────────────────────────────────────────
+
+test('start_game memasang tepat satu timer giliran', () => {
+  liveGame();
+  assert.equal(pending().length, 1);
+  assert.equal(turnTimers.length, 1);
+});
+
+// ── Rejected actions leave the timer alone ───────────────────────────────────
+
+test('pemain di luar giliran: skip_turn dan play_cards ditolak, timer yang sama tetap menunggu', () => {
+  const g = liveGame();
+  const timer = pending()[0];
+  const startedAt = g.game().turnStartedAt;
+  const outsider = g.other();
+  const card = g.game().hands[g.users[(g.users.indexOf(g.game().currentTurn) + 1) % 4]][0].id;
+  for (let i = 0; i < 3; i++) {
+    send(outsider, 'skip_turn', { roomCode: g.code });
+    assert.equal(codeOf(outsider), 'NOT_YOUR_TURN');
+    send(outsider, 'play_cards', { roomCode: g.code, cardIds: [card] });
+    assert.equal(codeOf(outsider), 'NOT_YOUR_TURN');
+  }
+  assert.equal(turnTimers.length, 1, 'tidak boleh ada timer baru');
+  assert.deepEqual(pending(), [timer]);
+  assert.equal(timer.cleared, false);
+  assert.equal(g.game().turnStartedAt, startedAt, 'turnStartedAt engine tidak berubah');
+});
+
+test('pemain yang gilirannya: aksi ditolak (kombinasi tidak sah, id buruk, kosong) tidak menyentuh timer', () => {
+  const g = liveGame();
+  const timer = pending()[0];
+  const me = g.cur();
+  const hand = g.game().hands[g.game().currentTurn];
+  const notMine = createDeck().map(c => c.id).find(id => !hand.some(c => c.id === id));
+  const differentRanks = [hand[0], hand.find(c => c.rank !== hand[0].rank)].map(c => c.id);
+  const cases = [
+    [differentRanks, 'INVALID_COMBO'],
+    [[notMine], 'CARD_NOT_IN_HAND'],
+    [[hand[0].id, hand[0].id], 'INVALID_CARD_IDS'],
+    ['abc', 'INVALID_CARD_IDS'],
+    [[], 'NO_CARDS_SELECTED'],
+  ];
+  for (const [cardIds, want] of cases) {
+    send(me, 'play_cards', { roomCode: g.code, cardIds });
+    assert.equal(codeOf(me), want, JSON.stringify(cardIds));
+    assert.equal(turnTimers.length, 1, `timer baru muncul setelah ${want}`);
+    assert.deepEqual(pending(), [timer]);
+  }
+});
+
+test('payload rusak (H2) juga tidak menyentuh timer', () => {
+  const g = liveGame();
+  const timer = pending()[0];
+  for (const bad of [undefined, null, 42, 'x']) {
+    g.cur().emit('play_cards', bad);
+    g.cur().emit('skip_turn', bad);
+  }
+  assert.deepEqual(pending(), [timer]);
+  assert.equal(turnTimers.length, 1);
+});
+
+// ── Accepted actions swap the timer ──────────────────────────────────────────
+
+test('play_cards diterima: timer lama dibersihkan dan tepat satu timer baru dipasang', () => {
+  const g = liveGame();
+  const old = pending()[0];
+  const me = g.cur();
+  const first = g.game().hands[g.game().currentTurn][0].id;
+  send(me, 'play_cards', { roomCode: g.code, cardIds: [first] });
+  assert.equal(me.last('error'), undefined);
+  assert.equal(old.cleared, true);
+  assert.equal(pending().length, 1);
+  assert.notEqual(pending()[0], old);
+  assert.equal(turnTimers.length, 2);
+});
+
+test('skip_turn diterima: timer lama dibersihkan dan tepat satu timer baru dipasang', () => {
+  const g = liveGame();
+  send(g.cur(), 'play_cards', { roomCode: g.code, cardIds: [g.game().hands[g.game().currentTurn][0].id] });
+  const old = pending()[0];
+  const skipper = g.cur();
+  send(skipper, 'skip_turn', { roomCode: g.code });
+  assert.equal(skipper.last('error'), undefined);
+  assert.equal(old.cleared, true);
+  assert.equal(pending().length, 1);
+  assert.notEqual(pending()[0], old);
+});
+
+test('play_cards yang mengakhiri game: tidak ada timer giliran tersisa selama jeda antar-game', async () => {
+  const g = liveGame();
+  const turn = g.game().currentTurn;
+  g.game().hands[turn] = [g.game().hands[turn][0]];      // satu kartu tersisa → memainkannya menang
+  const old = pending()[0];
+  send(g.cur(), 'play_cards', { roomCode: g.code, cardIds: [g.game().hands[turn][0].id] });
+  assert.equal(old.cleared, true, 'timer lama harus dibersihkan saat game selesai');
+  assert.equal(pending().length, 0, 'tidak boleh ada timer giliran selama jeda');
+  await tick();   // let the (accelerated) 5 s intermission callback run so it cannot leak into the next test
+});
+
+// ── Deadline is preserved ────────────────────────────────────────────────────
+
+test('timer asli tetap memicu auto-skip setelah banyak aksi ditolak (tenggat tidak bisa diperpanjang)', () => {
+  const g = liveGame();
+  const timer = pending()[0];
+  const victim = g.game().currentTurn;
+  const outsider = g.other();
+  for (let i = 0; i < 5; i++) send(outsider, 'skip_turn', { roomCode: g.code });
+  g.cur().clear();
+  fire(timer);
+  assert.ok(g.cur().all('auto_skipped').some(m => m.playerId === victim) || g.clients.some(c => c.all('auto_skipped').some(m => m.playerId === victim)),
+    'auto_skipped harus dikirim untuk pemain yang gilirannya habis');
+  assert.notEqual(g.game().currentTurn, victim, 'giliran harus berpindah');
+  assert.equal(pending().length, 1, 'timer untuk giliran berikutnya terpasang');
+});
+
+runTests(tests);

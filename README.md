@@ -18,6 +18,8 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
 | Combo Detector dan Group Chain (klien) | ✅ Tersedia |
 | Reconnect dan pemulihan sesi | ✅ Tersedia |
 | Host Kick | ✅ Tersedia |
+| Validasi `cardIds`, guard payload Socket.IO, timer giliran yang tidak bisa direset aksi ditolak, perlindungan jeda antar-game | ✅ Tersedia |
+| Validasi jumlah game per set (`maxGames`) di server | ❌ Belum (lihat Roadmap) |
 | Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
 | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
 | Posisi visual berlawanan arah jarum jam | ❌ Belum (rencana) |
@@ -26,7 +28,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
 
 ## ⚡ Quick Start
 
-Prasyarat: **Node.js 22.13 atau lebih baru** (backend memakai modul bawaan `node:sqlite`; diuji pada v22.23.4) dan npm.
+Prasyarat: **Node.js 22.x** dan npm. Backend memakai modul bawaan `node:sqlite`, yang hanya ada di Node.js versi baru. **Satu-satunya versi yang pernah diuji adalah v22.23.4.** Batas versi minimum belum diverifikasi; versi lain (termasuk 22.x yang lebih lama) belum diuji.
 
 ```bash
 # 1. Masuk ke folder proyek (folder yang berisi package.json root)
@@ -67,7 +69,7 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 
 | Layer | Teknologi |
 |---|---|
-| Backend | Node.js (≥ 22.13), Express 4, Socket.IO 4 |
+| Backend | Node.js 22.x (diuji: v22.23.4), Express 4, Socket.IO 4 |
 | Database | SQLite lewat modul bawaan `node:sqlite` (`DatabaseSync`; masih berstatus eksperimental di Node) |
 | Auth | JWT (`jsonwebtoken`, berlaku 7 hari) + `bcryptjs` |
 | Frontend | React 18, Vite 5 |
@@ -86,7 +88,8 @@ martil-main/
 ├── Patch/                       ← arsip patch lama (riwayat perubahan; tidak dipakai saat menjalankan proyek)
 │
 ├── backend/
-│   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo
+│   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
+│   │                              test:cardids, test:payload, test:timer, test:intermission
 │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
 │   ├── src/
 │   │   ├── server.js            ← entry point Express + Socket.IO
@@ -98,13 +101,16 @@ martil-main/
 │   │   │   ├── deck.js          ← kartu, urutan rank/suit, shuffle, deal
 │   │   │   ├── validator.js     ← deteksi dan perbandingan kombinasi
 │   │   │   ├── scorer.js        ← skor game dan peringkat set
+│   │   │   ├── cardIds.js       ← validasi bentuk daftar `cardIds` pada play_cards
 │   │   │   ├── engine.js        ← state machine satu game (giliran, rally, kemenangan)
 │   │   │   └── engine.test.js   ← uji Jest untuk perilaku rally/skip
 │   │   ├── rooms/roomManager.js ← Room, set, game, reconnect, Kick (state di memori)
-│   │   └── socket/socketHandler.js ← semua event Socket.IO, timer giliran, sweeper
+│   │   ├── socket/socketHandler.js ← semua event Socket.IO, timer giliran, sweeper
+│   │   └── socket/payload.js    ← guard bentuk payload event Socket.IO
 │   └── tests/
 │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
 │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
+│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js
 │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
 │
 └── frontend/
@@ -146,6 +152,11 @@ Catatan:
 - Request REST (`/api/...`) dari frontend lewat proxy Vite ke `http://localhost:3001` (tertulis di `frontend/vite.config.js`); Socket.IO tidak lewat proxy, melainkan langsung ke `VITE_SERVER_URL`.
 - Lokasi database tetap: `backend/data/martil.db` (otomatis dibuat). File ini berisi hash password pemain; jangan dibagikan atau di-commit.
 
+### Data lokal dan rahasia tidak boleh ikut terunggah
+`.gitignore` mengecualikan `.env` dan `.env.*` (kecuali `.env.example`), folder `backend/data/`, serta berkas `*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`, `*.sqlite3`.
+
+`.gitignore` hanya berlaku untuk berkas yang **belum** dilacak git. Bila `backend/data/martil.db` atau sebuah `.env` pernah ter-commit atau ter-push, hentikan pelacakannya (`git rm --cached <berkas>` lalu commit) dan anggap isi yang sudah terunggah telah terbuka: ganti `JWT_SECRET` dan minta pemain mengganti password. Menghapus berkas dari riwayat git membutuhkan langkah terpisah. Saat membagikan ZIP proyek, jangan sertakan `backend/data/`, `.env`, dan `node_modules/`.
+
 ---
 
 ## 🧭 Alur Aplikasi: Homepage → Room → Game → Result
@@ -171,7 +182,7 @@ Login ──► Homepage ──create_room / join_room──► Room ──start
 
 Aturan alur:
 - Set dimulai oleh Host dan butuh **tepat 4 pemain** yang semuanya sudah berada di Room (`inRoom`).
-- Game pertama dimulai oleh pemegang 3♠; game berikutnya dimulai oleh pemenang game sebelumnya. Antar-game ada jeda 5 detik sebelum game berikutnya diumumkan (`game_started`).
+- Game pertama dimulai oleh pemegang 3♠; game berikutnya dimulai oleh pemenang game sebelumnya. Antar-game ada jeda 5 detik sebelum game berikutnya diumumkan (`game_started`); selama jeda itu `play_cards` dan `skip_turn` ditolak dengan `GAME_STARTING`, dan timer giliran belum berjalan.
 - Setelah game terakhir, klien pindah ke Result sekitar 2 detik setelah `set_over`.
 - Di Result: **Back to Room** (`return_to_room`) tetap menjadi anggota Room dan mereset Room ke status menunggu; **Back to Menu Utama** (`leave_room`) keluar dari Room.
 - `leave_room` dan `return_to_room` ditolak saat game berjalan (`GAME_IN_PROGRESS`).
@@ -240,7 +251,7 @@ Kombinasi harus sejenis dengan kartu teratas di meja (Single melawan Single, dst
 | Tidak pernah main (13 kartu) | +52 langsung |
 
 ### Set dan Peringkat
-- Satu set = beberapa game (jumlah dipilih pembuat Room; tampilan membuat room menawarkan 3, 4, 5, atau 6 game; default 4). Skor tiap game dijumlahkan.
+- Satu set = beberapa game (jumlah dipilih pembuat Room; default 4). **Saat ini** tampilan membuat room menawarkan 3, 4, 5, atau 6 game dan server belum memvalidasi nilainya. Keputusan yang sudah ditetapkan: nantinya hanya 3, 4, atau 5 (lihat Roadmap). Skor tiap game dijumlahkan.
 - Poin total terkecil = Juara 1.
 - Bila poin total sama, urutan peringkat saat ini mengikuti urutan pemain di Room (belum ada aturan seri khusus).
 - Label `+5k / +3k / −3k / −5k` di halaman Result saat ini **hanya teks tampilan**; tidak ada saldo yang berubah (lihat Roadmap).
@@ -289,6 +300,27 @@ Koneksi memakai token JWT di handshake (`auth.token`); tanpa token valid koneksi
 
 Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kartu sendiri + jumlah kartu lawan).
 
+### Validasi input, timer giliran, dan kode error
+
+**Payload.** Setiap handler membaca payload lewat guard (`socket/payload.js`): payload harus berupa objek, dan `roomCode` / `targetId`, bila ada, harus string maksimal 64 karakter. Bentuk yang salah dijawab `INVALID_PAYLOAD` pada kanal yang sama dengan penolakan event itu: `leave_room_error` + `error` untuk `leave_room`, `return_room_error` + `error` untuk `return_to_room`, `kick_error` untuk `kick_player`, dan `error` untuk event lain. Field yang tidak dikirim tetap memakai kode lama (`NOT_IN_ROOM`, `ROOM_NOT_FOUND`). `create_room` tanpa payload tetap diterima. Exception tak terduga di handler ditangkap, dicatat dengan stack di log server, dan pengirim menerima `INTERNAL_ERROR`; server tetap berjalan.
+
+**`cardIds` pada `play_cards`.** Harus berupa array berisi id kartu yang sah (mis. `3D`, `10H`, `2S`), tanpa duplikat, paling banyak 13. Selain itu dijawab `INVALID_CARD_IDS`; tidak ada kartu dikirim tetap `NO_CARDS_SELECTED`. Urutan pemeriksaan engine: `GAME_NOT_ACTIVE`, `NOT_YOUR_TURN`, validasi bentuk `cardIds`, `CARD_NOT_IN_HAND`, lalu aturan kombinasi (`INVALID_COMBO`, `CANNOT_BEAT_TABLE`). Aturan permainan tidak berubah.
+
+**Timer giliran.** `play_cards` dan `skip_turn` divalidasi dulu; timer hanya diganti setelah aksi diterima. Aksi yang ditolak (dari siapa pun) tidak mengubah timer.
+
+**Jeda antar-game.** Dari akhir sebuah game sampai `game_started` dikirim, `play_cards` dan `skip_turn` dijawab `GAME_STARTING` (juga untuk pemain yang bukan gilirannya), auto-skip tidak berjalan, dan resume sesi tidak mengakhiri jeda.
+
+**Kode error yang dikirim server lewat Socket.IO:**
+
+| Kelompok | Kode |
+|---|---|
+| Umum | `INVALID_PAYLOAD`, `INTERNAL_ERROR`, `NOT_IN_ROOM`, `ROOM_NOT_FOUND`, `NOT_HOST` |
+| Room | `ROOM_FULL`, `GAME_ALREADY_STARTED`, `ALREADY_IN_ROOM`, `ALREADY_STARTED`, `NEED_4_PLAYERS`, `PLAYERS_NOT_READY`, `GAME_IN_PROGRESS` |
+| Kick | `CANNOT_KICK_SELF`, `TARGET_NOT_IN_ROOM`, `KICKED_FROM_ROOM` |
+| Game | `NO_ACTIVE_GAME`, `GAME_NOT_ACTIVE`, `GAME_STARTING`, `NOT_YOUR_TURN`, `NO_CARDS_SELECTED`, `INVALID_CARD_IDS`, `CARD_NOT_IN_HAND`, `INVALID_COMBO`, `CANNOT_BEAT_TABLE` |
+
+Frontend belum menerjemahkan kode-kode ini: hanya `ResultPage` yang menampilkan error dari server (mentah); Homepage dan Game belum menampilkannya.
+
 ### Reconnect dan pemulihan sesi
 Setiap kali socket tersambung (login, refresh, atau reconnect otomatis), klien mengirim `resume_session`; server mencari Room pemain berdasarkan akun (bukan kode Room) dan membalas:
 
@@ -326,6 +358,10 @@ Semua uji di bawah berjalan **tanpa browser dan tanpa WebSocket asli**: server d
 npm run test:sim     # protokol resume, timer, host, kadaluarsa
 npm run test:nav     # satu set penuh dimainkan bot, lalu Back to Room / Exit Room
 npm run test:kick    # Host Kick di Room dan di Result
+npm run test:cardids # validasi cardIds (duplikat, tipe salah, format) di engine dan lewat socket
+npm run test:payload # guard payload semua handler Socket.IO + jaring pengaman INTERNAL_ERROR
+npm run test:timer   # aksi ditolak tidak menyentuh timer giliran (spy setTimeout/clearTimeout)
+npm run test:intermission  # play/skip ditolak GAME_STARTING selama jeda antar-game
 npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
 npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
 ```
@@ -353,6 +389,8 @@ Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otoma
 - **Taruhan/nominal Room:** lencana taruhan di layar Game adalah placeholder; server belum punya data `bet`.
 - **Wallet / saldo:** belum ada. Tidak ada saldo, riwayat transaksi, atau pembaruan saldo setelah set.
 - **Tombol HINT dan AUTO:** placeholder, nonaktif.
+- **Validasi `maxGames`:** server menerima nilai apa pun pada `create_room` (belum divalidasi).
+- **Pesan error dari server:** belum ditampilkan di Homepage dan Game (hanya Result, dalam kode mentah).
 - **Riwayat tersimpan:** tabel `rooms`, `sets`, `games`, `game_scores` hanya ditulis; belum ada fitur yang membacanya. Tabel `room_players` dibuat tetapi belum dipakai.
 - **State Room/Game hanya di memori server:** hilang bila server restart; hanya mendukung satu proses.
 - **Email** pada register diterima server tetapi tidak dikirim dan tidak dipakai UI.
@@ -374,22 +412,24 @@ Bagian ini hanya mendokumentasikan arah pengembangan. **Tidak satu pun poin di b
 
 **A. Posisi pemain di meja.** Tampilan sudah memakai empat posisi (pemain utama di bawah, lawan kiri/atas/kanan). Rencana: arah posisi visual mengelilingi meja menjadi **berlawanan arah jarum jam**. Hanya pemetaan posisi visual yang berubah; urutan giliran dan validasi permainan tidak berubah.
 
-**B. Profil pemain.** Tampilkan nama pemain asli (bukan ID acak), avatar, level, dan informasi profil. ID internal pemain tetap unik dan tidak bergantung pada username. Informasi publik pemain dikirim lewat backend dengan daftar field yang eksplisit (tanpa email/hash password).
+**B. Profil pemain.** Tampilkan nama pemain asli (bukan ID acak), avatar, level, dan informasi profil. ID internal pemain tetap unik dan tidak bergantung pada username. Informasi publik pemain dikirim lewat backend dengan daftar field yang eksplisit (tanpa email/hash password). **Keputusan:** username nantinya dibuat unik dan tidak membedakan huruf besar/kecil (case-insensitive). Saat ini username masih case-sensitive.
 
-**C. Wallet virtual (hanya untuk uji gameplay).** Saldo awal 20.000 koin virtual. Satu set terdiri dari 3, 4, atau 5 game. Saldo hanya diperbarui setelah satu set selesai, berdasarkan peringkat akhir:
+**C. Wallet virtual (hanya untuk uji gameplay).** Saldo awal 20.000 koin virtual. Satu set terdiri dari 3, 4, atau 5 game (opsi 6 yang masih ada di UI akan dihapus dari UI dan dari validasi server). Saldo hanya diperbarui setelah satu set selesai, berdasarkan peringkat akhir. **Nominal Room menskalakan perubahan saldo:**
 
-| Peringkat | Perubahan saldo | Contoh dari 20.000 |
+| Peringkat | Room 5K | Room 10K |
 |---|---|---|
-| Juara 1 | +5.000 | 25.000 |
-| Juara 2 | +3.000 | 23.000 |
-| Juara 3 | −3.000 | 17.000 |
-| Juara 4 | −5.000 | 15.000 |
+| Juara 1 | +5.000 | +10.000 |
+| Juara 2 | +3.000 | +6.000 |
+| Juara 3 | −3.000 | −6.000 |
+| Juara 4 | −5.000 | −10.000 |
+
+Contoh Room 5K dari saldo 20.000: juara 1 menjadi 25.000, juara 2 23.000, juara 3 17.000, juara 4 15.000. Rumus umum untuk nominal selain 5K dan 10K belum ditetapkan.
 
 **D. Validasi saldo Room.** Room akan punya nominal (mis. 5K atau 10K). Pemain hanya boleh membuat/bergabung bila saldo cukup untuk menanggung kerugian maksimal (Room 5K: saldo 4.000 ditolak, 5.000 diterima). Validasi **wajib di backend**, bukan hanya frontend.
 
 **E. Arsitektur Wallet.** Modular dan terpisah dari Game Engine: Wallet Service, saldo pemain, riwayat transaksi (saldo sebelum/sesudah, delta, alasan, ID set, peringkat akhir), dan pencegahan pemrosesan ganda akibat event berulang, refresh, atau reconnect. Saldo adalah koin virtual: **tidak** ada top-up, pembayaran, cash-out, atau integrasi uang sungguhan.
 
-Pertanyaan desain yang belum diputuskan (dicatat agar tidak diasumsikan): apakah nilai perubahan saldo ikut berskala dengan nominal Room; cara menangani peringkat seri; perlakuan set yang tidak selesai (Room ditinggalkan).
+**Belum diputuskan (jangan diasumsikan dan jangan diimplementasikan dulu):** cara menangani peringkat seri (poin total sama) dan perlakuan set yang tidak selesai (mis. Room ditinggalkan).
 
 ---
 
@@ -397,7 +437,7 @@ Pertanyaan desain yang belum diputuskan (dicatat agar tidak diasumsikan): apakah
 
 **Port sudah dipakai?** Ubah `PORT` di `backend/.env`, lalu sesuaikan **dua** tempat di frontend: target proxy `/api` di `frontend/vite.config.js` dan `VITE_SERVER_URL` (untuk Socket.IO).
 
-**Error `node:sqlite` / database gagal dibuka?** Pastikan Node.js ≥ 22.13. Folder `backend/data/` dibuat otomatis; pastikan backend punya izin tulis. Peringatan "ExperimentalWarning: SQLite" di console adalah normal.
+**Error `node:sqlite` / database gagal dibuka?** Gunakan Node.js 22.x (versi yang diuji: v22.23.4; versi lain belum diuji). Folder `backend/data/` dibuat otomatis; pastikan backend punya izin tulis. Peringatan "ExperimentalWarning: SQLite" di console adalah normal.
 
 **Koneksi Socket.IO gagal?** Pastikan `CLIENT_URL` di `backend/.env` sama persis dengan URL frontend (hanya satu origin yang diizinkan) dan `VITE_SERVER_URL` menunjuk ke backend.
 
