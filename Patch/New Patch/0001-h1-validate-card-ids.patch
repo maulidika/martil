@@ -1,0 +1,253 @@
+diff --git a/backend/package.json b/backend/package.json
+index f9087ea..d279f68 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -10,7 +10,8 @@
+     "test:sim": "node tests/reconnect.sim.js",
+     "test:combo": "node tests/combo.consistency.js",
+     "test:nav": "node tests/room-navigation.sim.js",
+-    "test:kick": "node tests/kick.sim.js"
++    "test:kick": "node tests/kick.sim.js",
++    "test:cardids": "node tests/card-ids.sim.js"
+   },
+   "dependencies": {
+     "bcryptjs": "^3.0.3",
+diff --git a/backend/src/game/cardIds.js b/backend/src/game/cardIds.js
+new file mode 100644
+index 0000000..dbca869
+--- /dev/null
++++ b/backend/src/game/cardIds.js
+@@ -0,0 +1,39 @@
++'use strict';
++
++/**
++ * Validation of the `cardIds` list a client sends with `play_cards`.
++ * Pure function: no state, no side effects. The engine is the authority; the
++ * socket layer only forwards what the client sent.
++ */
++
++const { createDeck } = require('./deck');
++
++/** Every legal card id (e.g. "3S", "10H"). Built from the deck so it never drifts from deck.js. */
++const VALID_CARD_IDS = new Set(createDeck().map(c => c.id));
++
++/** A hand never holds more than 13 cards, so a longer list can never be a legal play. */
++const MAX_CARD_IDS = 13;
++
++/**
++ * @param {unknown} cardIds
++ * @returns {null | 'NO_CARDS_SELECTED' | 'INVALID_CARD_IDS'} null when the list is well-formed.
++ *   Well-formed only means "shape is valid": membership in the player's hand and the
++ *   combo rules are still checked by the engine afterwards.
++ */
++function validateCardIds(cardIds) {
++  // Same code as before for "nothing sent" so existing clients keep working.
++  if (!cardIds) return 'NO_CARDS_SELECTED';
++  if (!Array.isArray(cardIds)) return 'INVALID_CARD_IDS';
++  if (cardIds.length === 0) return 'NO_CARDS_SELECTED';
++  if (cardIds.length > MAX_CARD_IDS) return 'INVALID_CARD_IDS';
++
++  const seen = new Set();
++  for (const id of cardIds) {
++    if (typeof id !== 'string' || !VALID_CARD_IDS.has(id)) return 'INVALID_CARD_IDS';
++    if (seen.has(id)) return 'INVALID_CARD_IDS'; // one physical card cannot be played twice
++    seen.add(id);
++  }
++  return null;
++}
++
++module.exports = { validateCardIds, VALID_CARD_IDS, MAX_CARD_IDS };
+diff --git a/backend/src/game/engine.js b/backend/src/game/engine.js
+index b7f7080..68b60c5 100644
+--- a/backend/src/game/engine.js
++++ b/backend/src/game/engine.js
+@@ -3,6 +3,7 @@
+ const { deal, findFirstPlayer, sortHand } = require('./deck');
+ const { detectCombo, canBeat, cardsInHand } = require('./validator');
+ const { calcGameScores } = require('./scorer');
++const { validateCardIds } = require('./cardIds');
+ 
+ const TURN_TIMEOUT_MS = 30_000;
+ 
+@@ -44,7 +45,8 @@ class GameEngine {
+   static processPlay(state, playerId, cardIds) {
+     if (state.phase !== 'playing')          return err('GAME_NOT_ACTIVE');
+     if (state.currentTurn !== playerId)      return err('NOT_YOUR_TURN');
+-    if (!cardIds || cardIds.length === 0)    return err('NO_CARDS_SELECTED');
++    const idsError = validateCardIds(cardIds);
++    if (idsError)                            return err(idsError);
+ 
+     const hand = state.hands[playerId];
+     const playedCards = cardIds.map(id => hand.find(c => c.id === id)).filter(Boolean);
+diff --git a/backend/tests/card-ids.sim.js b/backend/tests/card-ids.sim.js
+new file mode 100644
+index 0000000..1645d3f
+--- /dev/null
++++ b/backend/tests/card-ids.sim.js
+@@ -0,0 +1,166 @@
++'use strict';
++/**
++ * H1 — validation of `cardIds` in play_cards (real engine + real socket handler, fake Socket.IO).
++ *   npm run test:cardids      (from the backend folder)
++ *
++ * Covered:
++ *   - duplicate ids can no longer fake a Pair / Tris / Four of a Kind out of one physical card
++ *   - wrong types and malformed ids are rejected with INVALID_CARD_IDS instead of throwing
++ *   - "nothing sent" keeps its old code (NO_CARDS_SELECTED); turn/phase checks keep precedence
++ *   - a rejected play never mutates the game state
++ *   - legal plays are unaffected (regression)
++ */
++const path = require('path');
++const { assert, rm, setup, newRoom, runTests } = require('./helpers/sim');
++const { GameEngine } = require(path.join('..', 'src', 'game', 'engine.js'));
++
++const tests = [];
++const test = (name, fn) => tests.push({ name, fn });
++
++const card = (rank, suit) => ({ rank, suit, id: `${rank}${suit}` });
++/** Deterministic game state: A is on turn and holds 3♠ 3♥ 4♦ 5♦; the others hold one filler card each. */
++function mkState() {
++  return {
++    gameNumber: 1, phase: 'playing', playerIds: ['A', 'B', 'C', 'D'],
++    hands: {
++      A: [card('3', 'S'), card('3', 'H'), card('4', 'D'), card('5', 'D')],
++      B: [card('6', 'D')], C: [card('7', 'D')], D: [card('8', 'D')],
++    },
++    currentTurn: 'A', table: [], skipCount: 0, passedPlayers: [], lastPlayerId: null, turnStartedAt: 0,
++  };
++}
++const snapshot = (s) => JSON.stringify(s);
++const play = (ids, state = mkState()) => ({ state, res: GameEngine.processPlay(state, 'A', ids) });
++
++// ── Engine: duplicates ───────────────────────────────────────────────────────
++
++test('id duplikat tidak boleh menjadi Pair dari satu kartu', () => {
++  const { res } = play(['3S', '3S']);
++  assert.equal(res.ok, false);
++  assert.equal(res.error, 'INVALID_CARD_IDS');
++});
++
++test('id duplikat tidak boleh menjadi Tris atau Four of a Kind', () => {
++  assert.equal(play(['3S', '3S', '3S']).res.error, 'INVALID_CARD_IDS');
++  assert.equal(play(['3S', '3S', '3S', '3S', '4D']).res.error, 'INVALID_CARD_IDS');
++});
++
++test('duplikat yang tersembunyi di antara kartu lain juga ditolak', () => {
++  assert.equal(play(['3S', '4D', '3S']).res.error, 'INVALID_CARD_IDS');
++});
++
++// ── Engine: types and format ─────────────────────────────────────────────────
++
++test('cardIds bukan array → INVALID_CARD_IDS dan tidak melempar exception', () => {
++  for (const bad of ['3S', { length: 1 }, 42, true, { 0: '3S' }]) {
++    const { res } = play(bad);
++    assert.equal(res.ok, false, `diterima: ${JSON.stringify(bad)}`);
++    assert.equal(res.error, 'INVALID_CARD_IDS', JSON.stringify(bad));
++  }
++});
++
++test('elemen bukan string → INVALID_CARD_IDS', () => {
++  for (const bad of [[1], [null], [undefined], [{ id: '3S' }], [['3S']], ['3S', 4]]) {
++    assert.equal(play(bad).res.error, 'INVALID_CARD_IDS', JSON.stringify(bad));
++  }
++});
++
++test('format id tidak valid → INVALID_CARD_IDS (bukan CARD_NOT_IN_HAND)', () => {
++  for (const bad of [[''], ['XX'], ['3s'], ['1S'], ['3S '], ['__proto__'], ['11H']]) {
++    assert.equal(play(bad).res.error, 'INVALID_CARD_IDS', JSON.stringify(bad));
++  }
++});
++
++test('daftar lebih panjang dari satu tangan (14 id) → INVALID_CARD_IDS', () => {
++  const ids = ['3D', '3C', '3H', '3S', '4D', '4C', '4H', '4S', '5D', '5C', '5H', '5S', '6D', '6C'];
++  assert.equal(play(ids).res.error, 'INVALID_CARD_IDS');
++});
++
++// ── Engine: compatibility ────────────────────────────────────────────────────
++
++test('tidak ada kartu dikirim tetap NO_CARDS_SELECTED (kode lama)', () => {
++  for (const none of [undefined, null, [], '', 0, false]) {
++    assert.equal(play(none).res.error, 'NO_CARDS_SELECTED', JSON.stringify(none));
++  }
++});
++
++test('urutan pemeriksaan: GAME_NOT_ACTIVE dan NOT_YOUR_TURN tetap lebih dulu dari validasi cardIds', () => {
++  const over = mkState(); over.phase = 'game_over';
++  assert.equal(GameEngine.processPlay(over, 'A', ['3S', '3S']).error, 'GAME_NOT_ACTIVE');
++  assert.equal(GameEngine.processPlay(mkState(), 'B', ['3S', '3S']).error, 'NOT_YOUR_TURN');
++});
++
++test('id valid tetapi bukan milik pemain → CARD_NOT_IN_HAND (tidak berubah)', () => {
++  assert.equal(play(['9S']).res.error, 'CARD_NOT_IN_HAND');
++});
++
++test('permainan sah tidak terpengaruh: Single, Pair, dan kombinasi tidak sah', () => {
++  assert.equal(play(['4D']).res.ok, true);
++  const pair = play(['3S', '3H']);
++  assert.equal(pair.res.ok, true);
++  assert.equal(pair.res.event.combo.type, 'pair');
++  assert.equal(pair.res.state.hands.A.length, 2);
++  assert.equal(play(['3S', '4D']).res.error, 'INVALID_COMBO');
++});
++
++test('permainan yang ditolak tidak mengubah state', () => {
++  for (const bad of [['3S', '3S'], '3S', [1], ['XX'], [], undefined]) {
++    const { state } = play(bad);
++    assert.equal(snapshot(state), snapshot(mkState()), `state berubah untuk ${JSON.stringify(bad)}`);
++  }
++});
++
++// ── Pure helper ──────────────────────────────────────────────────────────────
++
++test('validateCardIds: semua 52 id sah, dan himpunan berbeda sampai 5 kartu lolos', () => {
++  const { validateCardIds, VALID_CARD_IDS } = require(path.join('..', 'src', 'game', 'cardIds.js'));
++  assert.equal(VALID_CARD_IDS.size, 52);
++  const all = [...VALID_CARD_IDS];
++  for (let n = 1; n <= 5; n++) assert.equal(validateCardIds(all.slice(0, n)), null);
++  assert.equal(validateCardIds(all.slice(0, 13)), null);
++  assert.equal(validateCardIds([all[0], all[0]]), 'INVALID_CARD_IDS');
++});
++
++// ── Socket layer (server asli) ───────────────────────────────────────────────
++
++function liveGame() {
++  const env = setup();
++  const room = newRoom(env.io, 4, { start: true });
++  const g = rm.getRoom(room.code).currentGame;
++  const idx = room.users.indexOf(g.currentTurn);
++  return { ...env, ...room, g, me: room.clients[idx], hand: g.hands[g.currentTurn] };
++}
++
++test('socket: play_cards dengan id duplikat ditolak, tangan dan giliran tidak berubah', () => {
++  const { code, g, me, hand } = liveGame();
++  const before = snapshot(g);
++  const x = hand[0].id;
++  me.clear();
++  me.emit('play_cards', { roomCode: code, cardIds: [x, x] });
++  assert.equal(me.last('error')?.code, 'INVALID_CARD_IDS');
++  assert.equal(me.all('cards_played').length, 0);
++  assert.equal(snapshot(rm.getRoom(code).currentGame), before);
++});
++
++test('socket: cardIds string/object/null tidak melempar dan dijawab dengan error yang jelas', () => {
++  const { code, me } = liveGame();
++  for (const bad of ['abc', { length: 1 }, 7]) {
++    me.clear();
++    assert.doesNotThrow(() => me.emit('play_cards', { roomCode: code, cardIds: bad }));
++    assert.equal(me.last('error')?.code, 'INVALID_CARD_IDS', JSON.stringify(bad));
++  }
++  me.clear();
++  assert.doesNotThrow(() => me.emit('play_cards', { roomCode: code, cardIds: null }));
++  assert.equal(me.last('error')?.code, 'NO_CARDS_SELECTED');
++});
++
++test('socket: play_cards sah tetap diterima dan memajukan giliran', () => {
++  const { code, g, me, hand } = liveGame();
++  const first = g.currentTurn;
++  me.emit('play_cards', { roomCode: code, cardIds: [hand[0].id] });
++  assert.equal(me.last('error'), undefined);
++  assert.ok(me.all('cards_played').length === 1);
++  assert.notEqual(rm.getRoom(code).currentGame.currentTurn, first);
++});
++
++runTests(tests);

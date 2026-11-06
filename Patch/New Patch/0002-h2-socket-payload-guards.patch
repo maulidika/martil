@@ -1,0 +1,440 @@
+diff --git a/backend/package.json b/backend/package.json
+index d279f68..3cc23dd 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -11,7 +11,8 @@
+     "test:combo": "node tests/combo.consistency.js",
+     "test:nav": "node tests/room-navigation.sim.js",
+     "test:kick": "node tests/kick.sim.js",
+-    "test:cardids": "node tests/card-ids.sim.js"
++    "test:cardids": "node tests/card-ids.sim.js",
++    "test:payload": "node tests/payload-guards.sim.js"
+   },
+   "dependencies": {
+     "bcryptjs": "^3.0.3",
+diff --git a/backend/src/socket/payload.js b/backend/src/socket/payload.js
+new file mode 100644
+index 0000000..28c98a4
+--- /dev/null
++++ b/backend/src/socket/payload.js
+@@ -0,0 +1,54 @@
++'use strict';
++
++/**
++ * Input guards for Socket.IO event payloads. Pure functions, no state.
++ *
++ * A client can emit any event with any payload (nothing, null, a number, an array...).
++ * Destructuring such a value in a handler signature throws, so every handler reads its
++ * payload through readPayload() first and answers INVALID_PAYLOAD when the shape is wrong.
++ */
++
++/** Longest string field we accept (room codes are 6 chars, user ids are UUIDs of 36). */
++const MAX_STRING_LEN = 64;
++
++const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
++
++/**
++ * @param {unknown}  data            what the client sent as the event payload
++ * @param {string[]} stringFields    fields that, when present, must be strings (<= MAX_STRING_LEN chars)
++ * @param {{allowEmpty?: boolean}} [opts] allowEmpty: undefined/null means "no payload" and becomes {}
++ * @returns {object|null} the payload object, or null when it is malformed
++ *
++ * A missing field is NOT an error here: handlers keep their existing "missing → NOT_IN_ROOM /
++ * ROOM_NOT_FOUND" behaviour. Only a field that is present with the wrong type is rejected.
++ */
++function readPayload(data, stringFields = [], { allowEmpty = false } = {}) {
++  if (data === undefined || data === null) return allowEmpty ? {} : null;
++  if (!isPlainObject(data)) return null;
++  for (const field of stringFields) {
++    const v = data[field];
++    if (v === undefined) continue;
++    if (typeof v !== 'string' || v.length > MAX_STRING_LEN) return null;
++  }
++  return data;
++}
++
++/**
++ * Which client-visible event(s) carry a rejection for each event. These mirror the channels the
++ * handlers already use for their own rejections, so a client waiting for e.g. `leave_room_error`
++ * is still released.
++ */
++const ERROR_CHANNELS = {
++  leave_room:     ['leave_room_error', 'error'],
++  return_to_room: ['return_room_error', 'error'],
++  kick_player:    ['kick_error'],
++};
++
++/** Emit `{ code }` on every channel that belongs to `event`. Never throws. */
++function emitRejection(socket, event, code) {
++  for (const channel of ERROR_CHANNELS[event] || ['error']) {
++    try { socket.emit(channel, { code }); } catch { /* socket already gone */ }
++  }
++}
++
++module.exports = { readPayload, emitRejection, MAX_STRING_LEN, ERROR_CHANNELS };
+diff --git a/backend/src/socket/socketHandler.js b/backend/src/socket/socketHandler.js
+index 52f5158..0a6d0de 100644
+--- a/backend/src/socket/socketHandler.js
++++ b/backend/src/socket/socketHandler.js
+@@ -3,6 +3,7 @@
+ const { verifyToken } = require('../auth/jwt');
+ const rm = require('../rooms/roomManager');
+ const { TURN_TIMEOUT_MS } = require('../game/engine');
++const { readPayload, emitRejection } = require('./payload');
+ 
+ const timers = new Map(); // roomCode → timeoutHandle
+ 
+@@ -10,6 +11,23 @@ function debugLog(action, details = {}) {
+   console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details);
+ }
+ 
++/**
++ * Register an event handler that can never throw into Socket.IO. Payload guards (readPayload)
++ * handle the expected bad input; this is the safety net for anything unexpected: the error is
++ * logged with its stack and the sender gets INTERNAL_ERROR, while the server keeps running.
++ */
++function onSafe(socket, event, handler, { notify = true } = {}) {
++  socket.on(event, (...args) => {
++    try {
++      handler(...args);
++    } catch (err) {
++      debugLog('HANDLER_ERROR', { event, userId: socket.user?.id, message: err?.message });
++      console.error(err?.stack || err);
++      if (notify) emitRejection(socket, event, 'INTERNAL_ERROR');
++    }
++  });
++}
++
+ const SWEEP_INTERVAL_MS = 10_000;
+ 
+ module.exports = function registerSocketHandlers(io, opts = {}) {
+@@ -32,7 +50,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     debugLog('SOCKET_CONNECTED', { socketId: socket.id, userId });
+ 
+     // ── create_room ────────────────────────────────────────────────────────
+-    socket.on('create_room', ({ maxGames = 4 } = {}) => {
++    onSafe(socket, 'create_room', (data) => {
++      const payload = readPayload(data, [], { allowEmpty: true });
++      if (!payload) return emitRejection(socket, 'create_room', 'INVALID_PAYLOAD');
++      const { maxGames = 4 } = payload;
+       const result = rm.createRoom(userId, maxGames);
+       if (!result.ok) return socket.emit('error', { code: result.error });
+ 
+@@ -43,7 +64,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     });
+ 
+     // ── join_room ──────────────────────────────────────────────────────────
+-    socket.on('join_room', ({ roomCode }) => {
++    onSafe(socket, 'join_room', (data) => {
++      const payload = readPayload(data, ['roomCode']);
++      if (!payload) return emitRejection(socket, 'join_room', 'INVALID_PAYLOAD');
++      const { roomCode } = payload;
+       const room = rm.getRoom(roomCode);
+       if (!room) return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
+ 
+@@ -67,13 +91,16 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+ 
+     // ── resume_session ─────────────────────────────────────────────────────
+     // Dikirim klien setiap kali socket tersambung (login, refresh, atau reconnect).
+-    socket.on('resume_session', () => resumeFor(socket));
++    onSafe(socket, 'resume_session', () => resumeFor(socket));
+ 
+     // ── leave_room ─────────────────────────────────────────────────────────
+     // Keluar dari room dengan sengaja ("Exit Room" di Room, "Back to Menu Utama" di Scoreboard).
+     // Diizinkan saat status waiting/done. Hanya socket pemain ini yang keluar dari room;
+     // pemain lain tidak terpengaruh.
+-    socket.on('leave_room', ({ roomCode } = {}) => {
++    onSafe(socket, 'leave_room', (data) => {
++      const payload = readPayload(data, ['roomCode']);
++      if (!payload) return emitRejection(socket, 'leave_room', 'INVALID_PAYLOAD');
++      const { roomCode } = payload;
+       const code = String(roomCode || '').toUpperCase();
+       debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
+       // Pemain yang di-Kick dari Result: kembali ke Homepage mengakhiri pembatasan.
+@@ -110,7 +137,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+ 
+     // ── return_to_room ─────────────────────────────────────────────────────
+     // "Back to Room" di Scoreboard: tetap menjadi anggota room, state set lama dibersihkan.
+-    socket.on('return_to_room', ({ roomCode } = {}) => {
++    onSafe(socket, 'return_to_room', (data) => {
++      const payload = readPayload(data, ['roomCode']);
++      if (!payload) return emitRejection(socket, 'return_to_room', 'INVALID_PAYLOAD');
++      const { roomCode } = payload;
+       const code = String(roomCode || '').toUpperCase();
+       debugLog('RETURN_TO_ROOM_REQUEST', { userId, roomCode: code });
+       if (rm.getRestriction(userId)) {   // di-Kick dari Result: tidak boleh kembali ke Room sebelum ke Homepage
+@@ -140,7 +170,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+ 
+     // ── kick_player ────────────────────────────────────────────────────────
+     // Hanya Host, hanya saat game tidak berlangsung. Semua validasi di roomManager.kickPlayer.
+-    socket.on('kick_player', ({ roomCode, targetId } = {}) => {
++    onSafe(socket, 'kick_player', (data) => {
++      const payload = readPayload(data, ['roomCode', 'targetId']);
++      if (!payload) return emitRejection(socket, 'kick_player', 'INVALID_PAYLOAD');
++      const { roomCode, targetId } = payload;
+       const code = String(roomCode || '').toUpperCase();
+       const target = String(targetId || '');
+       if (!socket.rooms.has(code)) return socket.emit('kick_error', { code: 'NOT_IN_ROOM' });
+@@ -162,7 +195,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     });
+ 
+     // ── start_game ─────────────────────────────────────────────────────────
+-    socket.on('start_game', ({ roomCode }) => {
++    onSafe(socket, 'start_game', (data) => {
++      const payload = readPayload(data, ['roomCode']);
++      if (!payload) return emitRejection(socket, 'start_game', 'INVALID_PAYLOAD');
++      const { roomCode } = payload;
+       if (!requireInRoom(socket, roomCode)) return;
+       const room = rm.getRoom(roomCode);
+       if (!room)                   return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
+@@ -181,7 +217,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     });
+ 
+     // ── play_cards ─────────────────────────────────────────────────────────
+-    socket.on('play_cards', ({ roomCode, cardIds }) => {
++    onSafe(socket, 'play_cards', (data) => {
++      const payload = readPayload(data, ['roomCode']);
++      if (!payload) return emitRejection(socket, 'play_cards', 'INVALID_PAYLOAD');
++      const { roomCode, cardIds } = payload;   // cardIds: shape is validated by the engine (game/cardIds.js)
+       if (!requireInRoom(socket, roomCode)) return;
+       clearTimer(roomCode);
+ 
+@@ -204,7 +243,10 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+     });
+ 
+     // ── skip_turn ──────────────────────────────────────────────────────────
+-    socket.on('skip_turn', ({ roomCode }) => {
++    onSafe(socket, 'skip_turn', (data) => {
++      const payload = readPayload(data, ['roomCode']);
++      if (!payload) return emitRejection(socket, 'skip_turn', 'INVALID_PAYLOAD');
++      const { roomCode } = payload;
+       if (!requireInRoom(socket, roomCode)) return;
+       clearTimer(roomCode);
+ 
+@@ -228,7 +270,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+ 
+     // ── disconnect ─────────────────────────────────────────────────────────
+     // Hanya socket yang masih menjadi socket aktif pemain yang dihitung sebagai terputus.
+-    socket.on('disconnecting', (reason) => {
++    onSafe(socket, 'disconnecting', (reason) => {
+       debugLog('SOCKET_DISCONNECTING', { socketId: socket.id, userId, reason, rooms: [...socket.rooms].filter(r => r !== socket.id) });
+       if (rm.markRestrictedDisconnected(userId, socket.id)) debugLog('RESTRICTED_PLAYER_DISCONNECTED', { userId, socketId: socket.id });
+       for (const roomCode of socket.rooms) {
+@@ -241,7 +283,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
+           debugLog('DISCONNECT_IGNORED', { roomCode, userId, socketId: socket.id, why: 'socket sudah digantikan atau pemain sudah terputus' });
+         }
+       }
+-    });
++    }, { notify: false });   // the socket is already closing: nobody to tell
+   });
+ 
+   // ── Session resume ─────────────────────────────────────────────────────────
+diff --git a/backend/tests/payload-guards.sim.js b/backend/tests/payload-guards.sim.js
+new file mode 100644
+index 0000000..69a877d
+--- /dev/null
++++ b/backend/tests/payload-guards.sim.js
+@@ -0,0 +1,203 @@
++'use strict';
++/**
++ * H2 — payload guards on every Socket.IO handler (real socketHandler.js + roomManager.js, fake Socket.IO).
++ *   npm run test:payload      (from the backend folder)
++ *
++ * Covered:
++ *   - empty / wrong-type payloads never throw out of a handler and never change server state
++ *   - the sender gets INVALID_PAYLOAD on the same channel(s) the handler already uses for rejections
++ *   - fields with the wrong type (or absurdly long strings) are rejected; MISSING fields keep their old behaviour
++ *   - the safety net (onSafe): an unexpected internal exception is contained, reported as INTERNAL_ERROR,
++ *     and the server keeps serving other requests
++ */
++const path = require('path');
++const { assert, rm, setup, newRoom, uid, runTests } = require('./helpers/sim');
++
++const tests = [];
++const test = (name, fn) => tests.push({ name, fn });
++
++const BAD_PAYLOADS = [undefined, null, 42, 'str', true, [], ['x'], () => {}];
++const label = (v) => (typeof v === 'function' ? 'function' : JSON.stringify(v) ?? 'undefined');
++
++// Event → channels that must carry the rejection (kept independent from payload.js on purpose).
++const CHANNELS = {
++  join_room: ['error'], leave_room: ['leave_room_error', 'error'], return_to_room: ['return_room_error', 'error'],
++  kick_player: ['kick_error'], start_game: ['error'], play_cards: ['error'], skip_turn: ['error'], create_room: ['error'],
++};
++const ROOM_EVENTS = ['join_room', 'leave_room', 'return_to_room', 'kick_player', 'start_game', 'play_cards', 'skip_turn'];
++
++const roomFingerprint = (code) => {
++  const r = rm.getRoom(code);
++  return JSON.stringify({ players: r.players.map(p => [p.id, p.connected, p.inRoom]), host: r.hostId, status: r.status });
++};
++const codesOn = (c, ev) => c.all(ev).map(m => m.code);
++
++// ── Bad payload shapes ───────────────────────────────────────────────────────
++
++test('semua event ber-room: payload kosong/salah tipe → INVALID_PAYLOAD, tidak melempar, state room tidak berubah', () => {
++  const { io } = setup();
++  const { clients, code } = newRoom(io, 2);              // clients[0] = Host, sudah di dalam room
++  const outsider = io.connect(uid('out_'));
++  for (const ev of ROOM_EVENTS) {
++    for (const bad of BAD_PAYLOADS) {
++      for (const c of [clients[0], outsider]) {
++        const before = roomFingerprint(code);
++        c.clear();
++        assert.doesNotThrow(() => c.emit(ev, bad), `${ev}(${label(bad)}) melempar`);
++        for (const ch of CHANNELS[ev]) {
++          assert.deepEqual(codesOn(c, ch), ['INVALID_PAYLOAD'], `${ev}(${label(bad)}) kanal ${ch}: ${JSON.stringify(c.all(ch))}`);
++        }
++        assert.equal(roomFingerprint(code), before, `${ev}(${label(bad)}) mengubah state room`);
++      }
++    }
++  }
++});
++
++test('create_room: tanpa payload (undefined/null) tetap membuat room; bentuk lain ditolak', () => {
++  const { io } = setup();
++  for (const ok of [undefined, null]) {
++    const c = io.connect(uid('c_'));
++    assert.doesNotThrow(() => c.emit('create_room', ok));
++    assert.ok(c.last('room_created')?.code, `create_room(${label(ok)}) harus membuat room`);
++    assert.equal(rm.getRoom(c.last('room_created').code).maxGames, 4, 'default tetap 4');
++  }
++  for (const bad of [42, 'str', true, [], ['x'], () => {}]) {
++    const c = io.connect(uid('c_'));
++    assert.doesNotThrow(() => c.emit('create_room', bad));
++    assert.equal(c.last('room_created'), undefined, `create_room(${label(bad)}) tidak boleh membuat room`);
++    assert.deepEqual(codesOn(c, 'error'), ['INVALID_PAYLOAD'], label(bad));
++  }
++});
++
++// ── Field types ──────────────────────────────────────────────────────────────
++
++test('roomCode bukan string atau terlalu panjang → INVALID_PAYLOAD', () => {
++  const { io } = setup();
++  const { clients, code } = newRoom(io, 2);
++  const tooLong = 'A'.repeat(65);
++  for (const ev of ROOM_EVENTS) {
++    for (const badCode of [123, {}, [], true, tooLong]) {
++      const c = clients[0];
++      const before = roomFingerprint(code);
++      c.clear();
++      assert.doesNotThrow(() => c.emit(ev, { roomCode: badCode, targetId: 'x', cardIds: [] }));
++      for (const ch of CHANNELS[ev]) assert.deepEqual(codesOn(c, ch), ['INVALID_PAYLOAD'], `${ev} roomCode=${label(badCode).slice(0, 20)} kanal ${ch}`);
++      assert.equal(roomFingerprint(code), before);
++    }
++  }
++});
++
++test('kick_player: targetId bukan string → INVALID_PAYLOAD', () => {
++  const { io } = setup();
++  const { clients, code } = newRoom(io, 3);
++  for (const badTarget of [123, {}, [], true, 'B'.repeat(65)]) {
++    clients[0].clear();
++    clients[0].emit('kick_player', { roomCode: code, targetId: badTarget });
++    assert.deepEqual(codesOn(clients[0], 'kick_error'), ['INVALID_PAYLOAD'], label(badTarget).slice(0, 20));
++  }
++  assert.equal(rm.getRoom(code).players.length, 3);
++});
++
++// ── Missing fields keep old behaviour (compat) ───────────────────────────────
++
++test('field yang hilang pada payload objek tetap memakai kode lama (bukan INVALID_PAYLOAD)', () => {
++  const { io } = setup();
++  const { clients } = newRoom(io, 2);
++  const c = clients[0];
++  const expect = [
++    ['join_room', 'error', 'ROOM_NOT_FOUND'],
++    ['start_game', 'error', 'NOT_IN_ROOM'],
++    ['play_cards', 'error', 'NOT_IN_ROOM'],
++    ['skip_turn', 'error', 'NOT_IN_ROOM'],
++    ['kick_player', 'kick_error', 'NOT_IN_ROOM'],
++    ['return_to_room', 'return_room_error', 'NOT_IN_ROOM'],
++  ];
++  for (const [ev, ch, want] of expect) {
++    c.clear();
++    c.emit(ev, {});
++    assert.deepEqual(codesOn(c, ch), [want], `${ev}({})`);
++  }
++  c.clear();
++  c.emit('leave_room', {});
++  const got = codesOn(c, 'leave_room_error');
++  assert.equal(got.length, 1);
++  assert.ok(!['INVALID_PAYLOAD', 'INTERNAL_ERROR'].includes(got[0]), `leave_room({}) → ${got[0]}`);
++});
++
++test('payload sah tetap berjalan normal (regresi): buat, gabung, keluar', () => {
++  const { io } = setup();
++  const a = io.connect(uid('a_')), b = io.connect(uid('b_'));
++  a.emit('create_room', { maxGames: 4 });
++  const code = a.last('room_created').code;
++  b.emit('join_room', { roomCode: code });
++  assert.equal(rm.getRoom(code).players.length, 2);
++  b.emit('leave_room', { roomCode: code });
++  assert.equal(b.last('room_left').roomCode, code);
++  assert.equal(rm.getRoom(code).players.length, 1);
++});
++
++// ── Pure helper ──────────────────────────────────────────────────────────────
++
++test('readPayload: tabel perilaku', () => {
++  const { readPayload } = require(path.join('..', 'src', 'socket', 'payload.js'));
++  assert.deepEqual(readPayload({ roomCode: 'ABC123' }, ['roomCode']), { roomCode: 'ABC123' });
++  assert.deepEqual(readPayload({}, ['roomCode']), {});
++  assert.equal(readPayload(undefined, ['roomCode']), null);
++  assert.equal(readPayload(null, ['roomCode']), null);
++  assert.deepEqual(readPayload(undefined, [], { allowEmpty: true }), {});
++  assert.deepEqual(readPayload(null, [], { allowEmpty: true }), {});
++  assert.equal(readPayload([], [], { allowEmpty: true }), null);
++  assert.equal(readPayload({ roomCode: 5 }, ['roomCode']), null);
++  assert.equal(readPayload({ roomCode: 'x'.repeat(65) }, ['roomCode']), null);
++  assert.deepEqual(readPayload({ roomCode: 'x'.repeat(64) }, ['roomCode']), { roomCode: 'x'.repeat(64) });
++});
++
++// ── Safety net ───────────────────────────────────────────────────────────────
++
++function withStubbedConsoleError(fn) {
++  const orig = console.error; let calls = 0;
++  console.error = () => { calls++; };
++  try { return { result: fn(), calls }; } finally { console.error = orig; }
++}
++
++test('safety net: exception internal tidak lolos ke Socket.IO, pengirim mendapat INTERNAL_ERROR, server tetap melayani', () => {
++  const { io } = setup();
++  const a = io.connect(uid('a_')), b = io.connect(uid('b_'));
++  a.emit('create_room', { maxGames: 4 });
++  const code = a.last('room_created').code;
++
++  const origGetRoom = rm.getRoom;
++  rm.getRoom = () => { throw new Error('boom (disengaja oleh test)'); };
++  let out;
++  try {
++    out = withStubbedConsoleError(() => { b.clear(); assert.doesNotThrow(() => b.emit('join_room', { roomCode: code })); });
++  } finally { rm.getRoom = origGetRoom; }
++  assert.deepEqual(codesOn(b, 'error'), ['INTERNAL_ERROR']);
++  assert.equal(out.calls, 1, 'stack harus dilog satu kali');
++
++  b.clear(); b.emit('join_room', { roomCode: code });     // server masih hidup dan benar
++  assert.equal(rm.getRoom(code).players.length, 2);
++});
++
++test('safety net: event ber-channel khusus (leave_room) tetap melepas klien lewat leave_room_error', () => {
++  const { io } = setup();
++  const { clients, code } = newRoom(io, 2);
++  const orig = rm.leaveRoom;
++  rm.leaveRoom = () => { throw new Error('boom'); };
++  try { withStubbedConsoleError(() => clients[1].emit('leave_room', { roomCode: code })); } finally { rm.leaveRoom = orig; }
++  assert.deepEqual(codesOn(clients[1], 'leave_room_error'), ['INTERNAL_ERROR']);
++  assert.deepEqual(codesOn(clients[1], 'error'), ['INTERNAL_ERROR']);
++});
++
++test('safety net: exception saat disconnecting tidak lolos dan tidak mengirim apa pun', () => {
++  const { io } = setup();
++  const { clients } = newRoom(io, 2);
++  const orig = rm.markRestrictedDisconnected;
++  rm.markRestrictedDisconnected = () => { throw new Error('boom'); };
++  try {
++    withStubbedConsoleError(() => { clients[1].clear(); assert.doesNotThrow(() => clients[1].disconnect()); });
++  } finally { rm.markRestrictedDisconnected = orig; }
++  assert.equal(clients[1].all('error').length, 0);
++});
++
++runTests(tests);

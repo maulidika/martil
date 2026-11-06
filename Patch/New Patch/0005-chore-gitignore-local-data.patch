@@ -1,0 +1,26 @@
+diff --git a/.gitignore b/.gitignore
+index f1859bf..b11b0dd 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -5,10 +5,18 @@ node_modules/
+ dist/
+ build/
+ 
+-# Local environment files
++# Local environment files and secrets (never commit)
+ .env
+-.env.local
+-.env.*.local
++.env.*
++!.env.example
++
++# Local database and runtime data (the SQLite file contains password hashes; never commit or share)
++backend/data/
++*.db
++*.db-wal
++*.db-shm
++*.sqlite
++*.sqlite3
+ 
+ # Logs
+ npm-debug.log*
