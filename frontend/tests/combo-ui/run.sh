@@ -11,6 +11,6 @@ cp "$HERE/run.mjs" "$OUT/run.mjs"
 # Server asli dipakai sebagai pembanding independen.
 ln -s "$(cd "$HERE/../../../backend/src" && pwd)" "$OUT/server"
 node "$OUT/run.mjs"
-# Smoke test render GamePage (otomatis dilewati bila react/react-dom/typescript tidak tersedia).
+# Smoke test render GamePage (JSX dikompilasi dengan esbuild dari Vite; SKIP hanya bila node_modules belum ada, FAIL bila dependency hilang).
 cp "$HERE/render.mjs" "$OUT/render.mjs"
 NODE_PATH="${NODE_PATH:-}" node "$HERE/render.mjs"

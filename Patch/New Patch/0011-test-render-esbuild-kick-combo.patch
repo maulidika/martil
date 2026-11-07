@@ -1,0 +1,141 @@
+diff --git a/README.md b/README.md
+index 575d207..d6be32a 100644
+--- a/README.md
++++ b/README.md
+@@ -375,7 +375,7 @@ bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render
+ bash tests/kick-ui/run.sh     # logika Kick; render ResultPage/LobbyPage
+ bash tests/lobby-ui/run.sh    # render Homepage: pilihan jumlah game per set hanya 3, 4, 5
+ ```
+-Bagian render pada `combo-ui` dan `kick-ui` memakai `react-dom/server` dan dilewati otomatis bila react/react-dom/typescript tidak tersedia (jalankan `npm install` di `frontend` dulu).
++Bagian render pada `lobby-ui`, `combo-ui`, dan `kick-ui` memakai `react-dom/server`. JSX dikompilasi dengan esbuild yang dibawa Vite, jadi **TypeScript tidak dibutuhkan**. Bagian render dilewati (SKIP, exit 0, dengan pesan yang menyebut dependency yang kurang) hanya bila `frontend/node_modules` belum ada. Bila `node_modules` sudah ada tetapi react, react-dom, atau esbuild tidak ditemukan, test **GAGAL** (exit 1) agar tidak ada SKIP diam-diam; jalankan `npm install` di `frontend`.
+ 
+ **Opsional (browser nyata):** `frontend/tests/browser/` menguji `GamePage` di Chromium (butuh `esbuild`, Playwright, dan Chromium; lihat `frontend/tests/browser/README.md`).
+ 
+diff --git a/frontend/tests/combo-ui/render.mjs b/frontend/tests/combo-ui/render.mjs
+index 2bf8d83..27233d9 100644
+--- a/frontend/tests/combo-ui/render.mjs
++++ b/frontend/tests/combo-ui/render.mjs
+@@ -1,5 +1,6 @@
+ // Smoke test render GamePage.jsx ASLI dengan React + react-dom/server (render statis, tanpa DOM/efek).
+-// Membutuhkan paket react, react-dom, typescript yang bisa di-resolve; bila tidak ada, uji ini DILEWATI (SKIP).
++// JSX dikompilasi dengan esbuild (dibawa Vite, devDependency project ini); TypeScript tidak dibutuhkan.
++// SKIP (exit 0) hanya bila project belum punya node_modules; bila node_modules ada tetapi dependency hilang -> FAIL.
+ import assert from 'node:assert/strict'
+ import fs from 'node:fs'
+ import os from 'node:os'
+@@ -14,9 +15,24 @@ const roots = [...(process.env.NODE_PATH || '').split(path.delimiter).filter(Boo
+ try { roots.push(execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()) } catch {}
+ const req = createRequire(import.meta.url)
+ const find = (name) => { try { return req.resolve(name, { paths: [path.join(here, '../..'), ...roots] }) } catch { return null } }
+-const reactPath = find('react'), serverPath = find('react-dom/server'), tsPath = find('typescript')
+-if (!reactPath || !serverPath || !tsPath) { console.log('  SKIP   render GamePage: react / react-dom / typescript tidak ditemukan di mesin ini'); process.exit(0) }
+-const ts = req(tsPath), { renderToString } = req(serverPath), React = req(reactPath)
++// esbuild: resolved from where Vite itself resolves it (works with hoisted and nested layouts), else directly.
++const findEsbuild = () => {
++  const vitePath = find('vite')
++  if (vitePath) { try { return createRequire(vitePath).resolve('esbuild') } catch {} }
++  return find('esbuild')
++}
++const reactPath = find('react'), serverPath = find('react-dom/server'), esbuildPath = findEsbuild()
++const missing = [['react', reactPath], ['react-dom', serverPath], ['esbuild (dibawa oleh vite)', esbuildPath]].filter(([, p]) => !p).map(([n]) => n)
++if (missing.length) {
++  if (fs.existsSync(path.join(here, '../../node_modules'))) {
++    console.log(`  FAIL   render GamePage: node_modules sudah ada tetapi dependency ini tidak ditemukan: ${missing.join(', ')}. Jalankan "npm install" di folder frontend.`)
++    process.exit(1)
++  }
++  console.log(`  SKIP   render GamePage: dependency belum terpasang (${missing.join(', ')}). Jalankan "npm install" di folder frontend.`)
++  process.exit(0)
++}
++const esbuild = req(esbuildPath), { renderToString } = req(serverPath), React = req(reactPath)
++console.log(`  INFO   JSX dikompilasi dengan esbuild ${esbuild.version}`)
+ 
+ // ── lingkungan browser palsu ──
+ const ss = new Map(); const fakeStore = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
+@@ -38,8 +54,9 @@ fs.writeFileSync(path.join(OUT, 'stubs/socket.mjs'), `export const emitSocket =
+ fs.writeFileSync(path.join(OUT, 'stubs/waiting.mjs'), `export default function GameSyncWaiting() { return 'WAITING' }`)
+ const map = { react: pathToFileURL(reactPath).href, zustand: './stubs/zustand.mjs' }
+ const build = (rel, dest, rewrite) => {
+-  let code = ts.transpileModule(fs.readFileSync(path.join(SRC, rel), 'utf8'), { compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+-  code = code.replace(/from '([^']+)'/g, (m, spec) => `from '${rewrite(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
++  let code = esbuild.transformSync(fs.readFileSync(path.join(SRC, rel), 'utf8'), { loader: 'jsx', format: 'esm', target: 'es2022', jsx: 'transform', sourcefile: rel }).code
++  // esbuild prints import specifiers with double quotes: accept both quote styles.
++  code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${rewrite(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
+   fs.writeFileSync(path.join(OUT, dest), code)
+ }
+ const fix = (prefix) => (spec) => ({
+diff --git a/frontend/tests/combo-ui/run.sh b/frontend/tests/combo-ui/run.sh
+index 443a75d..b29464e 100644
+--- a/frontend/tests/combo-ui/run.sh
++++ b/frontend/tests/combo-ui/run.sh
+@@ -11,6 +11,6 @@ cp "$HERE/run.mjs" "$OUT/run.mjs"
+ # Server asli dipakai sebagai pembanding independen.
+ ln -s "$(cd "$HERE/../../../backend/src" && pwd)" "$OUT/server"
+ node "$OUT/run.mjs"
+-# Smoke test render GamePage (otomatis dilewati bila react/react-dom/typescript tidak tersedia).
++# Smoke test render GamePage (JSX dikompilasi dengan esbuild dari Vite; SKIP hanya bila node_modules belum ada, FAIL bila dependency hilang).
+ cp "$HERE/render.mjs" "$OUT/render.mjs"
+ NODE_PATH="${NODE_PATH:-}" node "$HERE/render.mjs"
+diff --git a/frontend/tests/kick-ui/render.mjs b/frontend/tests/kick-ui/render.mjs
+index 460def3..a7b28bb 100644
+--- a/frontend/tests/kick-ui/render.mjs
++++ b/frontend/tests/kick-ui/render.mjs
+@@ -1,4 +1,6 @@
+-// Render statis ResultPage.jsx dan LobbyPage.jsx ASLI (react-dom/server). Dilewati bila react/typescript tidak ada.
++// Render statis ResultPage.jsx dan LobbyPage.jsx ASLI (react-dom/server).
++// JSX dikompilasi dengan esbuild (dibawa Vite, devDependency project ini); TypeScript tidak dibutuhkan.
++// SKIP (exit 0) hanya bila project belum punya node_modules; bila node_modules ada tetapi dependency hilang -> FAIL.
+ import assert from 'node:assert/strict'
+ import fs from 'node:fs'
+ import os from 'node:os'
+@@ -13,9 +15,24 @@ const roots = [...(process.env.NODE_PATH || '').split(path.delimiter).filter(Boo
+ try { roots.push(execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()) } catch {}
+ const req = createRequire(import.meta.url)
+ const find = (name) => { try { return req.resolve(name, { paths: [path.join(here, '../..'), ...roots] }) } catch { return null } }
+-const reactPath = find('react'), serverPath = find('react-dom/server'), tsPath = find('typescript')
+-if (!reactPath || !serverPath || !tsPath) { console.log('  SKIP   render Result/Lobby: react / react-dom / typescript tidak ditemukan di mesin ini'); process.exit(0) }
+-const ts = req(tsPath), { renderToString } = req(serverPath), React = req(reactPath)
++// esbuild: resolved from where Vite itself resolves it (works with hoisted and nested layouts), else directly.
++const findEsbuild = () => {
++  const vitePath = find('vite')
++  if (vitePath) { try { return createRequire(vitePath).resolve('esbuild') } catch {} }
++  return find('esbuild')
++}
++const reactPath = find('react'), serverPath = find('react-dom/server'), esbuildPath = findEsbuild()
++const missing = [['react', reactPath], ['react-dom', serverPath], ['esbuild (dibawa oleh vite)', esbuildPath]].filter(([, p]) => !p).map(([n]) => n)
++if (missing.length) {
++  if (fs.existsSync(path.join(here, '../../node_modules'))) {
++    console.log(`  FAIL   render Result/Lobby: node_modules sudah ada tetapi dependency ini tidak ditemukan: ${missing.join(', ')}. Jalankan "npm install" di folder frontend.`)
++    process.exit(1)
++  }
++  console.log(`  SKIP   render Result/Lobby: dependency belum terpasang (${missing.join(', ')}). Jalankan "npm install" di folder frontend.`)
++  process.exit(0)
++}
++const esbuild = req(esbuildPath), { renderToString } = req(serverPath), React = req(reactPath)
++console.log(`  INFO   JSX dikompilasi dengan esbuild ${esbuild.version}`)
+ 
+ const ss = new Map(); const fake = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
+ globalThis.sessionStorage = fake; globalThis.localStorage = fake
+@@ -37,8 +54,9 @@ const map = (prefix) => (spec) => ({
+   '../hooks/useSocket': `${prefix}stubs/socket.mjs`,
+ }[spec] ?? ((spec.startsWith('../utils/') || spec.startsWith('../components/') || spec.startsWith('../store/')) ? spec + '.mjs' : spec))
+ const build = (rel, dest) => {
+-  let code = ts.transpileModule(fs.readFileSync(path.join(SRC, rel), 'utf8'), { compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+-  code = code.replace(/from '([^']+)'/g, (m, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
++  let code = esbuild.transformSync(fs.readFileSync(path.join(SRC, rel), 'utf8'), { loader: 'jsx', format: 'esm', target: 'es2022', jsx: 'transform', sourcefile: rel }).code
++  // esbuild prints import specifiers with double quotes: accept both quote styles.
++  code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
+   fs.writeFileSync(path.join(OUT, dest), code)
+ }
+ for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+diff --git a/frontend/tests/kick-ui/run.sh b/frontend/tests/kick-ui/run.sh
+index 0df20f7..3c1bdbb 100644
+--- a/frontend/tests/kick-ui/run.sh
++++ b/frontend/tests/kick-ui/run.sh
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ # Menguji logika Host Kick di klien (utils/kick.js ASLI) dan merender ResultPage/LobbyPage ASLI dengan
+-# React + react-dom/server (render statis; dilewati otomatis bila react/react-dom/typescript tidak ada).
++# React + react-dom/server (render statis, JSX dikompilasi dengan esbuild dari Vite; SKIP hanya bila node_modules belum ada).
+ #   bash tests/kick-ui/run.sh      (dari folder frontend)
+ set -euo pipefail
+ HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Menguji logika Host Kick di klien (utils/kick.js ASLI) dan merender ResultPage/LobbyPage ASLI dengan
-# React + react-dom/server (render statis; dilewati otomatis bila react/react-dom/typescript tidak ada).
+# React + react-dom/server (render statis, JSX dikompilasi dengan esbuild dari Vite; SKIP hanya bila node_modules belum ada).
 #   bash tests/kick-ui/run.sh      (dari folder frontend)
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"

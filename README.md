@@ -375,7 +375,7 @@ bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render 
 bash tests/kick-ui/run.sh     # logika Kick; render ResultPage/LobbyPage
 bash tests/lobby-ui/run.sh    # render Homepage: pilihan jumlah game per set hanya 3, 4, 5
 ```
-Bagian render pada `combo-ui` dan `kick-ui` memakai `react-dom/server` dan dilewati otomatis bila react/react-dom/typescript tidak tersedia (jalankan `npm install` di `frontend` dulu).
+Bagian render pada `lobby-ui`, `combo-ui`, dan `kick-ui` memakai `react-dom/server`. JSX dikompilasi dengan esbuild yang dibawa Vite, jadi **TypeScript tidak dibutuhkan**. Bagian render dilewati (SKIP, exit 0, dengan pesan yang menyebut dependency yang kurang) hanya bila `frontend/node_modules` belum ada. Bila `node_modules` sudah ada tetapi react, react-dom, atau esbuild tidak ditemukan, test **GAGAL** (exit 1) agar tidak ada SKIP diam-diam; jalankan `npm install` di `frontend`.
 
 **Opsional (browser nyata):** `frontend/tests/browser/` menguji `GamePage` di Chromium (butuh `esbuild`, Playwright, dan Chromium; lihat `frontend/tests/browser/README.md`).
 
