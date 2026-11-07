@@ -53,7 +53,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     onSafe(socket, 'create_room', (data) => {
       const payload = readPayload(data, [], { allowEmpty: true });
       if (!payload) return emitRejection(socket, 'create_room', 'INVALID_PAYLOAD');
-      const { maxGames = 4 } = payload;
+      const { maxGames = rm.DEFAULT_MAX_GAMES } = payload;   // validated by rm.createRoom (INVALID_MAX_GAMES)
       const result = rm.createRoom(userId, maxGames);
       if (!result.ok) return socket.emit('error', { code: result.error });
 

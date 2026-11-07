@@ -5,6 +5,9 @@ import { emitSocket } from '../hooks/useSocket'
 import Modal from '../components/Modal'
 import { canShowKick, kickConfirmText } from '../utils/kick'
 
+// Games per set offered when creating a Room. Must stay in sync with ALLOWED_MAX_GAMES in backend/src/rooms/roomManager.js.
+const MAX_GAMES_OPTIONS = [3, 4, 5]
+
 const C = { bg:'#1a1a2e', card:'#16213e', accent:'#e94560', muted:'#888', border:'#1a4a7a', text:'#eee', green:'#2ecc71', yellow:'#f39c12' }
 
 const s = {
@@ -132,7 +135,7 @@ export default function LobbyPage() {
             <div style={s.title}>Buat Room Baru</div>
             <label style={{ ...s.tag, display:'block', marginBottom:6 }}>Jumlah game per set</label>
             <div style={s.row}>
-              {[3,4,5,6].map(n => (
+              {MAX_GAMES_OPTIONS.map(n => (
                 <button
                   key={n}
                   onClick={() => setMaxGames(n)}

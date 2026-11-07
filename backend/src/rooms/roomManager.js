@@ -25,8 +25,17 @@ const restrictions = new Map();
 
 // ─── Room creation & joining ─────────────────────────────────────────────────
 
-function createRoom(hostId, maxGames = 4) {
+/**
+ * Games per set a Room can be created with. A strict number match: strings ("4"), floats, NaN, null, etc. are rejected.
+ * Keep in sync with MAX_GAMES_OPTIONS in frontend/src/pages/LobbyPage.jsx.
+ */
+const ALLOWED_MAX_GAMES = Object.freeze([3, 4, 5]);
+const DEFAULT_MAX_GAMES = 4;
+
+function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES) {
   if (restrictions.has(hostId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
+  // Validate before touching any state (a rejected request must not clear a KICKED removal record).
+  if (!ALLOWED_MAX_GAMES.includes(maxGames)) return { ok: false, error: 'INVALID_MAX_GAMES' };
   if (removals.get(hostId)?.reason === 'KICKED') removals.delete(hostId);
   const code = generateCode();
   const roomId = uuidv4();
@@ -559,6 +568,7 @@ function generateCode() {
 
 module.exports = {
   createRoom, joinRoom, getRoom, startSet, processPlay, processSkip, processAutoSkip, endIntermission,
+  ALLOWED_MAX_GAMES, DEFAULT_MAX_GAMES,
   leaveRoom, returnToRoom, restoreView, kickPlayer, getRestriction, clearRestriction, restrictedState, markRestrictedDisconnected, markDisconnected, bindSocket, findRoomByPlayer, resumeSession, sweepExpired,
   restartTurnClock, publicState, RECONNECT_WINDOW_MS,
 };

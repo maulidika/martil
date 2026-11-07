@@ -1,0 +1,110 @@
+diff --git a/README.md b/README.md
+index 8961349..575d207 100644
+--- a/README.md
++++ b/README.md
+@@ -19,7 +19,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
+ | Reconnect dan pemulihan sesi | ✅ Tersedia |
+ | Host Kick | ✅ Tersedia |
+ | Validasi `cardIds`, guard payload Socket.IO, timer giliran yang tidak bisa direset aksi ditolak, perlindungan jeda antar-game | ✅ Tersedia |
+-| Validasi jumlah game per set (`maxGames`) di server | ❌ Belum (lihat Roadmap) |
++| Jumlah game per set: hanya 3, 4, atau 5 (UI dan validasi server) | ✅ Tersedia |
+ | Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
+ | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
+ | Posisi visual berlawanan arah jarum jam | ❌ Belum (rencana) |
+@@ -89,7 +89,7 @@ martil-main/
+ │
+ ├── backend/
+ │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
+-│   │                              test:cardids, test:payload, test:timer, test:intermission
++│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames
+ │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
+ │   ├── src/
+ │   │   ├── server.js            ← entry point Express + Socket.IO
+@@ -110,7 +110,7 @@ martil-main/
+ │   └── tests/
+ │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
+ │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
+-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js
++│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js
+ │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
+ │
+ └── frontend/
+@@ -125,7 +125,7 @@ martil-main/
+     │   └── utils/               ← comboDetector, comboPicker, groupChain, handUi (logika tangan),
+     │                              gameLayout (ukuran/posisi kursi), profile (data profil sementara),
+     │                              session, kick (logika murni untuk UI)
+-    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui (bash), browser (Playwright, opsional)
++    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui, lobby-ui (bash), browser (Playwright, opsional)
+ ```
+ 
+ ---
+@@ -251,7 +251,7 @@ Kombinasi harus sejenis dengan kartu teratas di meja (Single melawan Single, dst
+ | Tidak pernah main (13 kartu) | +52 langsung |
+ 
+ ### Set dan Peringkat
+-- Satu set = beberapa game (jumlah dipilih pembuat Room; default 4). **Saat ini** tampilan membuat room menawarkan 3, 4, 5, atau 6 game dan server belum memvalidasi nilainya. Keputusan yang sudah ditetapkan: nantinya hanya 3, 4, atau 5 (lihat Roadmap). Skor tiap game dijumlahkan.
++- Satu set = 3, 4, atau 5 game, dipilih pembuat Room (default 4). Homepage hanya menawarkan ketiga nilai itu, dan server menolak nilai lain (`INVALID_MAX_GAMES`). Skor tiap game dijumlahkan.
+ - Poin total terkecil = Juara 1.
+ - Bila poin total sama, urutan peringkat saat ini mengikuti urutan pemain di Room (belum ada aturan seri khusus).
+ - Label `+5k / +3k / −3k / −5k` di halaman Result saat ini **hanya teks tampilan**; tidak ada saldo yang berubah (lihat Roadmap).
+@@ -279,7 +279,7 @@ Koneksi memakai token JWT di handshake (`auth.token`); tanpa token valid koneksi
+ | Event | Payload | Fungsi |
+ |---|---|---|
+ | `resume_session` | — | Pulihkan sesi (dikirim di setiap connect/reconnect) |
+-| `create_room` | `{maxGames}` | Buat Room |
++| `create_room` | `{maxGames}` (3, 4, atau 5; opsional, default 4) | Buat Room |
+ | `join_room` | `{roomCode}` | Gabung Room (anggota yang sudah ada diperlakukan sebagai resume) |
+ | `leave_room` | `{roomCode}` | Exit Room / Back to Menu Utama |
+ | `return_to_room` | `{roomCode}` | Back to Room dari Result |
+@@ -302,7 +302,7 @@ Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kar
+ 
+ ### Validasi input, timer giliran, dan kode error
+ 
+-**Payload.** Setiap handler membaca payload lewat guard (`socket/payload.js`): payload harus berupa objek, dan `roomCode` / `targetId`, bila ada, harus string maksimal 64 karakter. Bentuk yang salah dijawab `INVALID_PAYLOAD` pada kanal yang sama dengan penolakan event itu: `leave_room_error` + `error` untuk `leave_room`, `return_room_error` + `error` untuk `return_to_room`, `kick_error` untuk `kick_player`, dan `error` untuk event lain. Field yang tidak dikirim tetap memakai kode lama (`NOT_IN_ROOM`, `ROOM_NOT_FOUND`). `create_room` tanpa payload tetap diterima. Exception tak terduga di handler ditangkap, dicatat dengan stack di log server, dan pengirim menerima `INTERNAL_ERROR`; server tetap berjalan.
++**Payload.** Setiap handler membaca payload lewat guard (`socket/payload.js`): payload harus berupa objek, dan `roomCode` / `targetId`, bila ada, harus string maksimal 64 karakter. Bentuk yang salah dijawab `INVALID_PAYLOAD` pada kanal yang sama dengan penolakan event itu: `leave_room_error` + `error` untuk `leave_room`, `return_room_error` + `error` untuk `return_to_room`, `kick_error` untuk `kick_player`, dan `error` untuk event lain. Field yang tidak dikirim tetap memakai kode lama (`NOT_IN_ROOM`, `ROOM_NOT_FOUND`). `create_room` tanpa payload tetap diterima. `maxGames` pada `create_room` harus tepat angka 3, 4, atau 5 (string seperti `"4"`, pecahan, `NaN`, `null`, dan nilai lain ditolak `INVALID_MAX_GAMES` tanpa membuat Room dan tanpa mengubah state apa pun). Exception tak terduga di handler ditangkap, dicatat dengan stack di log server, dan pengirim menerima `INTERNAL_ERROR`; server tetap berjalan.
+ 
+ **`cardIds` pada `play_cards`.** Harus berupa array berisi id kartu yang sah (mis. `3D`, `10H`, `2S`), tanpa duplikat, paling banyak 13. Selain itu dijawab `INVALID_CARD_IDS`; tidak ada kartu dikirim tetap `NO_CARDS_SELECTED`. Urutan pemeriksaan engine: `GAME_NOT_ACTIVE`, `NOT_YOUR_TURN`, validasi bentuk `cardIds`, `CARD_NOT_IN_HAND`, lalu aturan kombinasi (`INVALID_COMBO`, `CANNOT_BEAT_TABLE`). Aturan permainan tidak berubah.
+ 
+@@ -315,7 +315,7 @@ Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kar
+ | Kelompok | Kode |
+ |---|---|
+ | Umum | `INVALID_PAYLOAD`, `INTERNAL_ERROR`, `NOT_IN_ROOM`, `ROOM_NOT_FOUND`, `NOT_HOST` |
+-| Room | `ROOM_FULL`, `GAME_ALREADY_STARTED`, `ALREADY_IN_ROOM`, `ALREADY_STARTED`, `NEED_4_PLAYERS`, `PLAYERS_NOT_READY`, `GAME_IN_PROGRESS` |
++| Room | `INVALID_MAX_GAMES`, `ROOM_FULL`, `GAME_ALREADY_STARTED`, `ALREADY_IN_ROOM`, `ALREADY_STARTED`, `NEED_4_PLAYERS`, `PLAYERS_NOT_READY`, `GAME_IN_PROGRESS` |
+ | Kick | `CANNOT_KICK_SELF`, `TARGET_NOT_IN_ROOM`, `KICKED_FROM_ROOM` |
+ | Game | `NO_ACTIVE_GAME`, `GAME_NOT_ACTIVE`, `GAME_STARTING`, `NOT_YOUR_TURN`, `NO_CARDS_SELECTED`, `INVALID_CARD_IDS`, `CARD_NOT_IN_HAND`, `INVALID_COMBO`, `CANNOT_BEAT_TABLE` |
+ 
+@@ -362,6 +362,7 @@ npm run test:cardids # validasi cardIds (duplikat, tipe salah, format) di engine
+ npm run test:payload # guard payload semua handler Socket.IO + jaring pengaman INTERNAL_ERROR
+ npm run test:timer   # aksi ditolak tidak menyentuh timer giliran (spy setTimeout/clearTimeout)
+ npm run test:intermission  # play/skip ditolak GAME_STARTING selama jeda antar-game
++npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepat waktunya
+ npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
+ npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
+ ```
+@@ -372,6 +373,7 @@ bash tests/sync.sim/run.sh    # state machine koneksi klien (socket, react, rout
+ bash tests/game-ui/run.sh     # layout, posisi kursi, profil sementara, format koin
+ bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render GamePage
+ bash tests/kick-ui/run.sh     # logika Kick; render ResultPage/LobbyPage
++bash tests/lobby-ui/run.sh    # render Homepage: pilihan jumlah game per set hanya 3, 4, 5
+ ```
+ Bagian render pada `combo-ui` dan `kick-ui` memakai `react-dom/server` dan dilewati otomatis bila react/react-dom/typescript tidak tersedia (jalankan `npm install` di `frontend` dulu).
+ 
+@@ -389,7 +391,7 @@ Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otoma
+ - **Taruhan/nominal Room:** lencana taruhan di layar Game adalah placeholder; server belum punya data `bet`.
+ - **Wallet / saldo:** belum ada. Tidak ada saldo, riwayat transaksi, atau pembaruan saldo setelah set.
+ - **Tombol HINT dan AUTO:** placeholder, nonaktif.
+-- **Validasi `maxGames`:** server menerima nilai apa pun pada `create_room` (belum divalidasi).
++- **Kolom `rooms.max_games`** di database belum punya `CHECK` constraint; batas 3/4/5 hanya dijaga di server (data yang ada saat ini hanya berisi 3, 4, atau 5).
+ - **Pesan error dari server:** belum ditampilkan di Homepage dan Game (hanya Result, dalam kode mentah).
+ - **Riwayat tersimpan:** tabel `rooms`, `sets`, `games`, `game_scores` hanya ditulis; belum ada fitur yang membacanya. Tabel `room_players` dibuat tetapi belum dipakai.
+ - **State Room/Game hanya di memori server:** hilang bila server restart; hanya mendukung satu proses.
+@@ -414,7 +416,7 @@ Bagian ini hanya mendokumentasikan arah pengembangan. **Tidak satu pun poin di b
+ 
+ **B. Profil pemain.** Tampilkan nama pemain asli (bukan ID acak), avatar, level, dan informasi profil. ID internal pemain tetap unik dan tidak bergantung pada username. Informasi publik pemain dikirim lewat backend dengan daftar field yang eksplisit (tanpa email/hash password). **Keputusan:** username nantinya dibuat unik dan tidak membedakan huruf besar/kecil (case-insensitive). Saat ini username masih case-sensitive.
+ 
+-**C. Wallet virtual (hanya untuk uji gameplay).** Saldo awal 20.000 koin virtual. Satu set terdiri dari 3, 4, atau 5 game (opsi 6 yang masih ada di UI akan dihapus dari UI dan dari validasi server). Saldo hanya diperbarui setelah satu set selesai, berdasarkan peringkat akhir. **Nominal Room menskalakan perubahan saldo:**
++**C. Wallet virtual (hanya untuk uji gameplay).** Saldo awal 20.000 koin virtual. Satu set terdiri dari 3, 4, atau 5 game (opsi 6 sudah dihapus dari UI dan ditolak server). Saldo hanya diperbarui setelah satu set selesai, berdasarkan peringkat akhir. **Nominal Room menskalakan perubahan saldo:**
+ 
+ | Peringkat | Room 5K | Room 10K |
+ |---|---|---|

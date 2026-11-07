@@ -1,0 +1,65 @@
+diff --git a/frontend/tests/lobby-ui/render.mjs b/frontend/tests/lobby-ui/render.mjs
+index 4bd7b39..e46ac03 100644
+--- a/frontend/tests/lobby-ui/render.mjs
++++ b/frontend/tests/lobby-ui/render.mjs
+@@ -1,4 +1,7 @@
+-// Static render of the real LobbyPage.jsx (react-dom/server). Skipped when react/typescript are missing.
++// Static render of the real LobbyPage.jsx (react-dom/server).
++// JSX is compiled with esbuild, which ships with Vite (a devDependency of this project): no TypeScript needed.
++// Skipped (exit 0) only when the project has no node_modules yet; once dependencies are installed, a missing
++// one is a hard FAIL so the render can never be skipped silently.
+ import assert from 'node:assert/strict'
+ import fs from 'node:fs'
+ import os from 'node:os'
+@@ -13,9 +16,24 @@ const roots = [...(process.env.NODE_PATH || '').split(path.delimiter).filter(Boo
+ try { roots.push(execSync('npm root -g', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()) } catch {}
+ const req = createRequire(import.meta.url)
+ const find = (name) => { try { return req.resolve(name, { paths: [path.join(here, '../..'), ...roots] }) } catch { return null } }
+-const reactPath = find('react'), serverPath = find('react-dom/server'), tsPath = find('typescript')
+-if (!reactPath || !serverPath || !tsPath) { console.log('  SKIP   render Lobby: react / react-dom / typescript tidak ditemukan di mesin ini'); process.exit(0) }
+-const ts = req(tsPath), { renderToString } = req(serverPath), React = req(reactPath)
++// esbuild: resolved from where Vite itself resolves it (works with hoisted and nested layouts), else directly.
++const findEsbuild = () => {
++  const vitePath = find('vite')
++  if (vitePath) { try { return createRequire(vitePath).resolve('esbuild') } catch {} }
++  return find('esbuild')
++}
++const reactPath = find('react'), serverPath = find('react-dom/server'), esbuildPath = findEsbuild()
++const missing = [['react', reactPath], ['react-dom', serverPath], ['esbuild (dibawa oleh vite)', esbuildPath]].filter(([, p]) => !p).map(([n]) => n)
++if (missing.length) {
++  if (fs.existsSync(path.join(here, '../../node_modules'))) {
++    console.log(`  FAIL   render Lobby: node_modules sudah ada tetapi dependency ini tidak ditemukan: ${missing.join(', ')}. Jalankan "npm install" di folder frontend.`)
++    process.exit(1)
++  }
++  console.log(`  SKIP   render Lobby: dependency belum terpasang (${missing.join(', ')}). Jalankan "npm install" di folder frontend.`)
++  process.exit(0)
++}
++const esbuild = req(esbuildPath), { renderToString } = req(serverPath), React = req(reactPath)
++console.log(`  INFO   JSX dikompilasi dengan esbuild ${esbuild.version}`)
+ 
+ const ss = new Map(); const fake = { getItem: k => ss.get(k) ?? null, setItem: (k, v) => ss.set(k, v), removeItem: k => ss.delete(k) }
+ globalThis.sessionStorage = fake; globalThis.localStorage = fake
+@@ -37,8 +55,9 @@ const map = (prefix) => (spec) => ({
+   '../hooks/useSocket': `${prefix}stubs/socket.mjs`,
+ }[spec] ?? ((spec.startsWith('../utils/') || spec.startsWith('../components/') || spec.startsWith('../store/')) ? spec + '.mjs' : spec))
+ const build = (rel, dest) => {
+-  let code = ts.transpileModule(fs.readFileSync(path.join(SRC, rel), 'utf8'), { compilerOptions: { jsx: ts.JsxEmit.React, module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText
+-  code = code.replace(/from '([^']+)'/g, (m, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
++  let code = esbuild.transformSync(fs.readFileSync(path.join(SRC, rel), 'utf8'), { loader: 'jsx', format: 'esm', target: 'es2022', jsx: 'transform', sourcefile: rel }).code
++  // esbuild prints import specifiers with double quotes: accept both quote styles.
++  code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
+   fs.writeFileSync(path.join(OUT, dest), code)
+ }
+ for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+diff --git a/frontend/tests/lobby-ui/run.sh b/frontend/tests/lobby-ui/run.sh
+index 6d250d7..e7fde84 100644
+--- a/frontend/tests/lobby-ui/run.sh
++++ b/frontend/tests/lobby-ui/run.sh
+@@ -1,6 +1,6 @@
+ #!/usr/bin/env bash
+ # Renders the REAL LobbyPage.jsx with React + react-dom/server (static render; skipped automatically when
+-# react/react-dom/typescript are not installed) and checks what Homepage offers when creating a Room.
++# dependencies are not installed yet) and checks what Homepage offers when creating a Room.
+ #   bash tests/lobby-ui/run.sh      (from the frontend folder)
+ set -euo pipefail
+ HERE="$(cd "$(dirname "$0")" && pwd)"
