@@ -15,7 +15,8 @@
     "test:payload": "node tests/payload-guards.sim.js",
     "test:timer": "node tests/turn-timer.sim.js",
     "test:intermission": "node tests/intermission.sim.js",
-    "test:maxgames": "node tests/max-games.sim.js"
+    "test:maxgames": "node tests/max-games.sim.js",
+    "test:singleroom": "node tests/single-room.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

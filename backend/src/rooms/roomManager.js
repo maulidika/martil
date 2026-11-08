@@ -26,6 +26,19 @@ const restrictions = new Map();
 // ─── Room creation & joining ─────────────────────────────────────────────────
 
 /**
+ * The Room (other than `exceptCode`) this account is currently a member of, or null.
+ * Membership = being in `room.players`, whatever the Room status (waiting, playing, done) and whether the
+ * socket is connected or not: a disconnected player keeps the seat until the sweeper expires it.
+ * An account may belong to at most one Room at a time.
+ */
+function roomOfPlayer(userId, exceptCode = null) {
+  for (const room of rooms.values()) {
+    if (room.code !== exceptCode && room.players.some(p => p.id === userId)) return room;
+  }
+  return null;
+}
+
+/**
  * Games per set a Room can be created with. A strict number match: strings ("4"), floats, NaN, null, etc. are rejected.
  * Keep in sync with MAX_GAMES_OPTIONS in frontend/src/pages/LobbyPage.jsx.
  */
@@ -36,6 +49,7 @@ function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES) {
   if (restrictions.has(hostId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
   // Validate before touching any state (a rejected request must not clear a KICKED removal record).
   if (!ALLOWED_MAX_GAMES.includes(maxGames)) return { ok: false, error: 'INVALID_MAX_GAMES' };
+  if (roomOfPlayer(hostId))                   return { ok: false, error: 'ALREADY_IN_OTHER_ROOM' };
   if (removals.get(hostId)?.reason === 'KICKED') removals.delete(hostId);
   const code = generateCode();
   const roomId = uuidv4();
@@ -71,6 +85,8 @@ function joinRoom(code, playerId) {
   if (restrictions.has(playerId))                  return { ok: false, error: 'KICKED_FROM_ROOM' };
   const room = rooms.get(code);
   if (!room)                                       return { ok: false, error: 'ROOM_NOT_FOUND' };
+  // One Room per account. Checked before anything below so a rejected join changes nothing (no reset of a finished Room).
+  if (roomOfPlayer(playerId, code))                return { ok: false, error: 'ALREADY_IN_OTHER_ROOM' };
   if (room.status === 'playing')                   return { ok: false, error: 'GAME_ALREADY_STARTED' };
   if (room.players.length >= 4)                    return { ok: false, error: 'ROOM_FULL' };
   if (room.players.find(p => p.id === playerId))   return { ok: false, error: 'ALREADY_IN_ROOM' };

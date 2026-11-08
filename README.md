@@ -20,6 +20,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
 | Host Kick | ✅ Tersedia |
 | Validasi `cardIds`, guard payload Socket.IO, timer giliran yang tidak bisa direset aksi ditolak, perlindungan jeda antar-game | ✅ Tersedia |
 | Jumlah game per set: hanya 3, 4, atau 5 (UI dan validasi server) | ✅ Tersedia |
+| Satu akun hanya boleh menjadi anggota satu Room pada satu waktu (validasi server) | ✅ Tersedia |
 | Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
 | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
 | Posisi visual berlawanan arah jarum jam | ❌ Belum (rencana) |
@@ -89,7 +90,7 @@ martil-main/
 │
 ├── backend/
 │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames
+│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom
 │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
 │   ├── src/
 │   │   ├── server.js            ← entry point Express + Socket.IO
@@ -110,7 +111,7 @@ martil-main/
 │   └── tests/
 │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
 │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js
+│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js
 │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
 │
 └── frontend/
@@ -187,6 +188,7 @@ Aturan alur:
 - Di Result: **Back to Room** (`return_to_room`) tetap menjadi anggota Room dan mereset Room ke status menunggu; **Back to Menu Utama** (`leave_room`) keluar dari Room.
 - `leave_room` dan `return_to_room` ditolak saat game berjalan (`GAME_IN_PROGRESS`).
 - Room berstatus selesai yang punya kursi kosong tetap bisa dimasuki pemain baru (Room kembali ke status menunggu).
+- **Satu akun = satu Room.** Selama akun masih menjadi anggota sebuah Room (status menunggu, bermain, atau selesai/Result, termasuk saat socket-nya terputus dan kursinya belum kedaluwarsa), `create_room` dan `join_room` ke Room lain ditolak dengan `ALREADY_IN_OTHER_ROOM`. Akun bebas lagi setelah `leave_room` (Exit Room / Back to Menu Utama), setelah di-Kick dari Room, atau setelah kursinya kedaluwarsa (60 detik terputus). `join_room` ke Room yang sama tetap berarti resume sesi.
 - Hasil set (peringkat, skor, riwayat game) dibekukan di server (`setResult`) dan di klien, sehingga Result tidak berubah saat pemain lain mereset Room dan bisa dipulihkan setelah refresh.
 
 ---
@@ -315,7 +317,7 @@ Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kar
 | Kelompok | Kode |
 |---|---|
 | Umum | `INVALID_PAYLOAD`, `INTERNAL_ERROR`, `NOT_IN_ROOM`, `ROOM_NOT_FOUND`, `NOT_HOST` |
-| Room | `INVALID_MAX_GAMES`, `ROOM_FULL`, `GAME_ALREADY_STARTED`, `ALREADY_IN_ROOM`, `ALREADY_STARTED`, `NEED_4_PLAYERS`, `PLAYERS_NOT_READY`, `GAME_IN_PROGRESS` |
+| Room | `INVALID_MAX_GAMES`, `ALREADY_IN_OTHER_ROOM`, `ROOM_FULL`, `GAME_ALREADY_STARTED`, `ALREADY_IN_ROOM`, `ALREADY_STARTED`, `NEED_4_PLAYERS`, `PLAYERS_NOT_READY`, `GAME_IN_PROGRESS` |
 | Kick | `CANNOT_KICK_SELF`, `TARGET_NOT_IN_ROOM`, `KICKED_FROM_ROOM` |
 | Game | `NO_ACTIVE_GAME`, `GAME_NOT_ACTIVE`, `GAME_STARTING`, `NOT_YOUR_TURN`, `NO_CARDS_SELECTED`, `INVALID_CARD_IDS`, `CARD_NOT_IN_HAND`, `INVALID_COMBO`, `CANNOT_BEAT_TABLE` |
 
@@ -363,6 +365,7 @@ npm run test:payload # guard payload semua handler Socket.IO + jaring pengaman I
 npm run test:timer   # aksi ditolak tidak menyentuh timer giliran (spy setTimeout/clearTimeout)
 npm run test:intermission  # play/skip ditolak GAME_STARTING selama jeda antar-game
 npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepat waktunya
+npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
 npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
 npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
 ```

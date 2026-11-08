@@ -1,0 +1,225 @@
+'use strict';
+/**
+ * H6 — one account can be a member of only ONE Room at a time (real socketHandler.js + roomManager.js, fake Socket.IO).
+ *   npm run test:singleroom      (from the backend folder)
+ *
+ * Before the fix the same account could create and join any number of Rooms at once (a probe put one account in 3 Rooms),
+ * which makes resume_session ambiguous and would let a player cover several Room stakes with one balance.
+ *
+ * Covered:
+ *   - create_room and join_room are rejected with ALREADY_IN_OTHER_ROOM while the account is in another Room,
+ *     whatever that Room's status (waiting, playing, done/Result) and even when the socket is disconnected
+ *   - a rejected request changes nothing (the target Room is not reset, the current Room is untouched)
+ *   - leaving (leave_room), being kicked, or seat expiry frees the account again
+ *   - joining your OWN Room again is still a resume; other accounts are unaffected
+ *   - an invariant fuzz: after hundreds of random create/join/leave/disconnect/expire steps no account is in 2 Rooms
+ */
+const { TURN_TIMEOUT_MS } = require('../src/game/engine.js');
+const { assert, rm, setup, newRoom, uid, advance, runTests } = require('./helpers/sim');
+
+// Installed AFTER the helper: this layer decides when the 5 s gap between games ends (needed to finish sets).
+const gapCallbacks = [];
+const prevSetTimeout = global.setTimeout;
+const prevClearTimeout = global.clearTimeout;
+global.setTimeout = (fn, ms, ...a) => {
+  if (ms === 5000) { const t = { fn, fake: true }; gapCallbacks.push(t); return t; }
+  if (ms === TURN_TIMEOUT_MS) return { fn, fake: true };
+  return prevSetTimeout(fn, ms, ...a);
+};
+global.clearTimeout = (h) => (h && typeof h === 'object' && h.fake ? undefined : prevClearTimeout(h));
+const endGap = () => { const t = gapCallbacks.shift(); assert.ok(t, 'tidak ada jeda yang menunggu'); t.fn(); };
+
+const tests = [];
+const test = (name, fn) => tests.push({ name, fn });
+const errs = (c) => c.all('error').map(m => m.code);
+const CODE = 'ALREADY_IN_OTHER_ROOM';
+
+/** Play a whole 4-game set quickly: the player on turn is left with one card and plays it. */
+function finishSet({ clients, users, code }) {
+  const game = () => rm.getRoom(code).currentGame;
+  const finishGame = () => {
+    const turn = game().currentTurn;
+    game().hands[turn] = [game().hands[turn][0]];
+    clients[users.indexOf(turn)].emit('play_cards', { roomCode: code, cardIds: [game().hands[turn][0].id] });
+  };
+  for (let i = 1; i < rm.getRoom(code).maxGames; i++) { finishGame(); endGap(); }
+  finishGame();
+  assert.equal(rm.getRoom(code).status, 'done');
+}
+
+// ── create_room ──────────────────────────────────────────────────────────────
+
+test('create_room saat masih anggota room (waiting) ditolak; room lama tidak berubah', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2);
+  for (const c of A.clients) {
+    c.clear(); c.emit('create_room', { maxGames: 4 });
+    assert.deepEqual(errs(c), [CODE]);
+    assert.equal(c.last('room_created'), undefined);
+  }
+  assert.equal(rm.getRoom(A.code).players.length, 2);
+  assert.equal(rm.getRoom(A.code).hostId, A.users[0]);
+});
+
+test('create_room dua kali berturut-turut: hanya satu room yang jadi', () => {
+  const { io } = setup();
+  const c = io.connect(uid('x_'));
+  c.emit('create_room', { maxGames: 4 }); c.emit('create_room', { maxGames: 4 });
+  assert.equal(c.all('room_created').length, 1);
+  assert.deepEqual(errs(c), [CODE]);
+});
+
+// ── join_room ────────────────────────────────────────────────────────────────
+
+test('join_room ke room lain saat anggota room (waiting) ditolak; room tujuan tidak berubah', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2), B = newRoom(io, 1);
+  const c = A.clients[1];
+  c.clear(); c.emit('join_room', { roomCode: B.code });
+  assert.deepEqual(errs(c), [CODE]);
+  assert.equal(c.last('room_updated'), undefined);
+  assert.equal(rm.getRoom(B.code).players.length, 1);
+  assert.equal(rm.getRoom(A.code).players.length, 2);
+});
+
+test('room yang tidak ada tetap ROOM_NOT_FOUND (bukan ALREADY_IN_OTHER_ROOM)', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2);
+  A.clients[1].clear(); A.clients[1].emit('join_room', { roomCode: 'ZZZZZZ' });
+  assert.deepEqual(errs(A.clients[1]), ['ROOM_NOT_FOUND']);
+});
+
+// ── Room statuses ────────────────────────────────────────────────────────────
+
+test('anggota room yang sedang bermain tidak bisa membuat atau bergabung ke room lain', () => {
+  const { io } = setup();
+  const A = newRoom(io, 4, { start: true }), B = newRoom(io, 1);
+  const c = A.clients[1];
+  c.clear(); c.emit('create_room', { maxGames: 4 }); c.emit('join_room', { roomCode: B.code });
+  assert.deepEqual(errs(c), [CODE, CODE]);
+  assert.equal(rm.getRoom(B.code).players.length, 1);
+});
+
+test('room selesai (di Result): ditolak sampai leave_room; sesudahnya bebas', () => {
+  const { io } = setup();
+  const A = newRoom(io, 4, { start: true });
+  finishSet(A);
+  const c = A.clients[1];
+  c.clear(); c.emit('create_room', { maxGames: 4 });
+  assert.deepEqual(errs(c), [CODE]);
+  c.emit('leave_room', { roomCode: A.code });
+  assert.ok(c.last('room_left'));
+  c.clear(); c.emit('create_room', { maxGames: 4 });
+  assert.ok(c.last('room_created'));
+  assert.deepEqual(errs(c), []);
+});
+
+test('join ke room yang sudah selesai oleh anggota room lain ditolak dan room itu TIDAK di-reset', () => {
+  const { io } = setup();
+  const A = newRoom(io, 4, { start: true });
+  finishSet(A);
+  A.clients[3].emit('leave_room', { roomCode: A.code });                // A: done, 3 pemain, kursi kosong
+  const room = rm.getRoom(A.code);
+  assert.equal(room.status, 'done'); assert.ok(room.setResult);
+  const C = newRoom(io, 2);
+  const x = C.clients[1];
+  x.clear(); x.emit('join_room', { roomCode: A.code });
+  assert.deepEqual(errs(x), [CODE]);
+  assert.equal(room.status, 'done', 'room tidak boleh kembali ke waiting');
+  assert.ok(room.setResult, 'hasil set tidak boleh terhapus');
+  assert.equal(room.players.length, 3);
+});
+
+// ── Freed again ──────────────────────────────────────────────────────────────
+
+test('setelah leave_room (waiting) akun boleh membuat atau bergabung ke room lain', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2), B = newRoom(io, 1);
+  const c = A.clients[1];
+  c.emit('leave_room', { roomCode: A.code });
+  c.clear(); c.emit('join_room', { roomCode: B.code });
+  assert.deepEqual(errs(c), []);
+  assert.equal(rm.getRoom(B.code).players.length, 2);
+  assert.equal(rm.getRoom(A.code).players.length, 1);
+  c.emit('leave_room', { roomCode: B.code });
+  c.clear(); c.emit('create_room', { maxGames: 3 });
+  assert.ok(c.last('room_created'));
+});
+
+test('pemain yang di-kick dari Room boleh membuat room baru lagi', () => {
+  const { io } = setup();
+  const A = newRoom(io, 3);
+  A.clients[0].emit('kick_player', { roomCode: A.code, targetId: A.users[2] });
+  assert.ok(A.clients[2].last('kicked'));
+  A.clients[2].clear(); A.clients[2].emit('create_room', { maxGames: 4 });
+  assert.ok(A.clients[2].last('room_created'));
+  assert.deepEqual(errs(A.clients[2]), []);
+});
+
+test('anggota yang terputus tetap dihitung sampai kursinya kedaluwarsa (60 dtk)', () => {
+  const { io, handle } = setup();
+  const A = newRoom(io, 2);
+  A.clients[1].disconnect();
+  const back = io.connect(A.users[1]);                                   // tab baru, akun sama, belum resume
+  back.emit('create_room', { maxGames: 4 });
+  assert.deepEqual(errs(back), [CODE], 'kursi lama masih ada selama masa tunggu');
+  advance(61_000); handle.sweep();
+  assert.equal(rm.getRoom(A.code).players.length, 1);
+  back.clear(); back.emit('create_room', { maxGames: 4 });
+  assert.ok(back.last('room_created'), 'setelah kursi kedaluwarsa akun bebas lagi');
+});
+
+// ── Unchanged behaviour ──────────────────────────────────────────────────────
+
+test('join_room ke room SENDIRI tetap berarti resume, bukan error', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2);
+  const c = A.clients[1];
+  c.clear(); c.emit('join_room', { roomCode: A.code });
+  assert.deepEqual(errs(c), []);
+  assert.ok(c.last('session_restored'));
+});
+
+test('rm.joinRoom oleh anggota room yang sama tetap ALREADY_IN_ROOM (bukan ALREADY_IN_OTHER_ROOM)', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2);
+  assert.deepEqual(rm.joinRoom(A.code, A.users[1]), { ok: false, error: 'ALREADY_IN_ROOM' });
+});
+
+test('akun lain tidak terpengaruh: boleh membuat room sendiri dan bergabung ke room yang punya kursi', () => {
+  const { io } = setup();
+  const A = newRoom(io, 2);
+  const other = io.connect(uid('o_'));
+  other.emit('join_room', { roomCode: A.code });
+  assert.equal(rm.getRoom(A.code).players.length, 3);
+  const third = io.connect(uid('t_'));
+  third.emit('create_room', { maxGames: 5 });
+  assert.ok(third.last('room_created'));
+});
+
+// ── Invariant fuzz ───────────────────────────────────────────────────────────
+
+test('fuzz: setelah ratusan langkah acak tidak ada akun yang berada di dua room sekaligus', () => {
+  const { io, handle } = setup();
+  let seed = 20260101;
+  const rnd = (n) => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed % n; };
+  const users = Array.from({ length: 8 }, (_, i) => uid(`f${i}_`));
+  const clients = new Map(users.map(u => [u, io.connect(u)]));
+  const codes = new Set();
+  const memberships = (u) => [...codes].filter(c => rm.getRoom(c)?.players.some(p => p.id === u));
+  let rejected = 0, created = 0, joined = 0;
+  for (let step = 0; step < 600; step++) {
+    const u = users[rnd(users.length)];
+    const c = clients.get(u);
+    switch (rnd(6)) {
+      case 0: case 1: { c.clear(); c.emit('create_room', { maxGames: 3 + rnd(3) }); const r = c.last('room_created'); if (r) { codes.add(r.code); created++; } else if (errs(c).includes(CODE)) rejected++; break; }
+      case 2: case 3: { const list = [...codes]; if (!list.length) break; c.clear(); c.emit('join_room', { roomCode: list[rnd(list.length)] }); if (errs(c).includes(CODE)) rejected++; else if (c.last('room_updated')) joined++; break; }
+      case 4: { const mine = memberships(u); if (mine.length) c.emit('leave_room', { roomCode: mine[0] }); break; }
+      case 5: { if (rnd(3) === 0) { advance(61_000); handle.sweep(); } else { c.disconnect(); clients.set(u, io.connect(u)); } break; }
+    }
+    for (const x of users) assert.ok(memberships(x).length <= 1, `langkah ${step}: ${x} ada di ${memberships(x).join(', ')}`);
+  }
+  assert.ok(created > 10 && joined > 10 && rejected > 10, `fuzz kurang bervariasi: created=${created} joined=${joined} rejected=${rejected}`);
+});
+
+runTests(tests);
