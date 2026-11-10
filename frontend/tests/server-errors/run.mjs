@@ -3,7 +3,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { messageForServerError, SERVER_ERROR_CODES } from '../../src/utils/serverErrors.js'
 
-const BACKEND = process.env.BACKEND_SRC
+// Runs standalone: `node tests/server-errors/run.mjs` from any folder, no environment variable needed.
+// BACKEND_SRC still overrides the backend location when set.
+const { fileURLToPath } = await import('node:url')
+const BACKEND = process.env.BACKEND_SRC || fileURLToPath(new URL('../../../backend/src/', import.meta.url))
 let pass = 0, fail = 0
 const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
 

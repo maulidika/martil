@@ -19,7 +19,7 @@ const C = { deep:'#0f3460', accent:'#e94560', border:'#1a4a7a' }
 export default function GamePage() {
   const navigate = useNavigate()
   const { user, roomCode, gameState, currentTurn, selectedIds,
-          setSelection, clearSelection, events, roomInfo, connected, setError } = useGameStore()
+          setSelection, clearSelection, events, roomInfo, connected, setError, error, clearError } = useGameStore()
 
   const currentRoomCode = roomCode || roomInfo?.code
   const myTurn   = currentTurn === user?.id
@@ -107,6 +107,13 @@ export default function GamePage() {
     toastRef.current = setTimeout(() => setToast(null), 2800)
   }, [events[0]?._id])
 
+  // Errors disappear on their own after a few seconds (a new error restarts the timer).
+  useEffect(() => {
+    if (!error) return
+    const timer = setTimeout(clearError, 4000)
+    return () => clearTimeout(timer)
+  }, [error])
+
   /* ── actions ─────────────────────────────────────────────── */
   // Fungsi biasa (bukan useCallback): selalu memakai ui/seleksi terbaru dari render ini.
   const handlePlay = () => {
@@ -179,6 +186,16 @@ export default function GamePage() {
           padding:'8px 18px', borderRadius:24, zIndex:999, whiteSpace:'nowrap',
           pointerEvents:'none', border:`1px solid ${T.glassBorder}`,
         }}>{toast}</div>
+      )}
+
+      {/* Error from the server or from a rejected local action (e.g. "Bukan giliranmu") */}
+      {error && (
+        <div role="alert" data-testid="game-error" style={{
+          position:'fixed', top:(toast ? 52 : 12), left:'50%', transform:'translateX(-50%)',
+          background:'rgba(120,20,40,0.94)', color:'#fff', fontSize:13, fontWeight:600,
+          padding:'8px 18px', borderRadius:24, zIndex:998, maxWidth:'92vw', textAlign:'center',
+          pointerEvents:'none', border:'1px solid rgba(255,120,140,0.6)',
+        }}>{error}</div>
       )}
 
       {/* Area meja: info, AUTO, kursi lawan, kartu di meja */}

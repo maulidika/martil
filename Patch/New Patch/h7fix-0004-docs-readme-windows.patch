@@ -1,0 +1,13 @@
+diff --git a/README.md b/README.md
+index cc42dda..40f2ec5 100644
+--- a/README.md
++++ b/README.md
+@@ -382,6 +382,8 @@ bash tests/server-errors/run.sh  # peta pesan error vs semua kode error yang bis
+ ```
+ Bagian render pada `lobby-ui`, `combo-ui`, dan `kick-ui` memakai `react-dom/server`. JSX dikompilasi dengan esbuild yang dibawa Vite, jadi **TypeScript tidak dibutuhkan**. Bagian render dilewati (SKIP, exit 0, dengan pesan yang menyebut dependency yang kurang) hanya bila `frontend/node_modules` belum ada. Bila `node_modules` sudah ada tetapi react, react-dom, atau esbuild tidak ditemukan, test **GAGAL** (exit 1) agar tidak ada SKIP diam-diam; jalankan `npm install` di `frontend`.
+ 
++**Windows / tanpa bash.** Dua tes berikut berjalan hanya dengan Node, tanpa bash dan tanpa environment variable, dari folder mana pun: `npm run test:sync` (atau `node tests/sync.sim/main.mjs`) dan `npm run test:server-errors` (atau `node tests/server-errors/run.mjs`). `node tests/lobby-ui/render.mjs` menjalankan render Homepage/Room, dan bagian render `kick-ui` dan `combo-ui` juga bisa dijalankan langsung (`node tests/kick-ui/render.mjs`, `node tests/combo-ui/render.mjs`). Skrip `run.sh` untuk `game-ui` dan bagian logika `kick-ui`/`combo-ui` masih membutuhkan bash (mis. Git Bash; `combo-ui` membuat symlink). `server-errors` membaca `backend/src` secara otomatis; variabel `BACKEND_SRC` bersifat opsional untuk menimpa lokasinya. `server-errors` mengimpor langsung file ES module `src/utils/serverErrors.js` tanpa `"type": "module"`, jadi bergantung pada deteksi sintaks module otomatis Node 22.x: terbukti jalan di v22.23.4 (sandbox) dan v22.23.1 (Windows, dilaporkan pengguna); versi Node lain belum diuji.
++
+ **Opsional (browser nyata):** `frontend/tests/browser/` menguji `GamePage` di Chromium (butuh `esbuild`, Playwright, dan Chromium; lihat `frontend/tests/browser/README.md`).
+ 
+ **Skrip manual:** `node frontend/trace-sockets.js` (backend harus berjalan) mendaftarkan akun `trace1`–`trace4`, membuat Room, dan memulai game. Gagal bila akun tersebut sudah ada.

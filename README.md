@@ -21,6 +21,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
 | Validasi `cardIds`, guard payload Socket.IO, timer giliran yang tidak bisa direset aksi ditolak, perlindungan jeda antar-game | ✅ Tersedia |
 | Jumlah game per set: hanya 3, 4, atau 5 (UI dan validasi server) | ✅ Tersedia |
 | Satu akun hanya boleh menjadi anggota satu Room pada satu waktu (validasi server) | ✅ Tersedia |
+| Pesan error server tampil di UI dalam bahasa Indonesia (Homepage, Room, Game, Result) | ✅ Tersedia |
 | Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
 | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
 | Posisi visual berlawanan arah jarum jam | ❌ Belum (rencana) |
@@ -125,8 +126,8 @@ martil-main/
     │   ├── components/          ← Modal, ConnectionOverlay, GameSyncWaiting, game/ui.jsx (tampilan meja)
     │   └── utils/               ← comboDetector, comboPicker, groupChain, handUi (logika tangan),
     │                              gameLayout (ukuran/posisi kursi), profile (data profil sementara),
-    │                              session, kick (logika murni untuk UI)
-    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui, lobby-ui (bash), browser (Playwright, opsional)
+    │                              session, kick, serverErrors (pesan error server) (logika murni untuk UI)
+    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui, lobby-ui, server-errors (bash), browser (Playwright, opsional)
 ```
 
 ---
@@ -321,7 +322,7 @@ Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kar
 | Kick | `CANNOT_KICK_SELF`, `TARGET_NOT_IN_ROOM`, `KICKED_FROM_ROOM` |
 | Game | `NO_ACTIVE_GAME`, `GAME_NOT_ACTIVE`, `GAME_STARTING`, `NOT_YOUR_TURN`, `NO_CARDS_SELECTED`, `INVALID_CARD_IDS`, `CARD_NOT_IN_HAND`, `INVALID_COMBO`, `CANNOT_BEAT_TABLE` |
 
-Frontend belum menerjemahkan kode-kode ini: hanya `ResultPage` yang menampilkan error dari server (mentah); Homepage dan Game belum menampilkannya.
+Frontend menerjemahkan kode-kode ini ke pesan Indonesia (`frontend/src/utils/serverErrors.js`; kode yang tidak dikenal tampil sebagai "Terjadi kesalahan (KODE)."). Pesan tampil sebagai alert di Homepage dan Room (`LobbyPage`), sebagai banner di atas meja pada Game, dan di Result; di Homepage/Room dan Game pesan hilang sendiri setelah beberapa detik. Error `kick_error` memakai pesan terpisah di `utils/kick.js`.
 
 ### Reconnect dan pemulihan sesi
 Setiap kali socket tersambung (login, refresh, atau reconnect otomatis), klien mengirim `resume_session`; server mencari Room pemain berdasarkan akun (bukan kode Room) dan membalas:
@@ -376,9 +377,12 @@ bash tests/sync.sim/run.sh    # state machine koneksi klien (socket, react, rout
 bash tests/game-ui/run.sh     # layout, posisi kursi, profil sementara, format koin
 bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render GamePage
 bash tests/kick-ui/run.sh     # logika Kick; render ResultPage/LobbyPage
-bash tests/lobby-ui/run.sh    # render Homepage: pilihan jumlah game per set hanya 3, 4, 5
+bash tests/lobby-ui/run.sh    # render Homepage/Room: pilihan jumlah game per set 3, 4, 5 dan tampilan error server
+bash tests/server-errors/run.sh  # peta pesan error vs semua kode error yang bisa dikirim backend (tanpa browser)
 ```
 Bagian render pada `lobby-ui`, `combo-ui`, dan `kick-ui` memakai `react-dom/server`. JSX dikompilasi dengan esbuild yang dibawa Vite, jadi **TypeScript tidak dibutuhkan**. Bagian render dilewati (SKIP, exit 0, dengan pesan yang menyebut dependency yang kurang) hanya bila `frontend/node_modules` belum ada. Bila `node_modules` sudah ada tetapi react, react-dom, atau esbuild tidak ditemukan, test **GAGAL** (exit 1) agar tidak ada SKIP diam-diam; jalankan `npm install` di `frontend`.
+
+**Windows / tanpa bash.** Dua tes berikut berjalan hanya dengan Node, tanpa bash dan tanpa environment variable, dari folder mana pun: `npm run test:sync` (atau `node tests/sync.sim/main.mjs`) dan `npm run test:server-errors` (atau `node tests/server-errors/run.mjs`). `node tests/lobby-ui/render.mjs` menjalankan render Homepage/Room, dan bagian render `kick-ui` dan `combo-ui` juga bisa dijalankan langsung (`node tests/kick-ui/render.mjs`, `node tests/combo-ui/render.mjs`). Skrip `run.sh` untuk `game-ui` dan bagian logika `kick-ui`/`combo-ui` masih membutuhkan bash (mis. Git Bash; `combo-ui` membuat symlink). `server-errors` membaca `backend/src` secara otomatis; variabel `BACKEND_SRC` bersifat opsional untuk menimpa lokasinya. `server-errors` mengimpor langsung file ES module `src/utils/serverErrors.js` tanpa `"type": "module"`, jadi bergantung pada deteksi sintaks module otomatis Node 22.x: terbukti jalan di v22.23.4 (sandbox) dan v22.23.1 (Windows, dilaporkan pengguna); versi Node lain belum diuji.
 
 **Opsional (browser nyata):** `frontend/tests/browser/` menguji `GamePage` di Chromium (butuh `esbuild`, Playwright, dan Chromium; lihat `frontend/tests/browser/README.md`).
 
@@ -395,7 +399,6 @@ Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otoma
 - **Wallet / saldo:** belum ada. Tidak ada saldo, riwayat transaksi, atau pembaruan saldo setelah set.
 - **Tombol HINT dan AUTO:** placeholder, nonaktif.
 - **Kolom `rooms.max_games`** di database belum punya `CHECK` constraint; batas 3/4/5 hanya dijaga di server (data yang ada saat ini hanya berisi 3, 4, atau 5).
-- **Pesan error dari server:** belum ditampilkan di Homepage dan Game (hanya Result, dalam kode mentah).
 - **Riwayat tersimpan:** tabel `rooms`, `sets`, `games`, `game_scores` hanya ditulis; belum ada fitur yang membacanya. Tabel `room_players` dibuat tetapi belum dipakai.
 - **State Room/Game hanya di memori server:** hilang bila server restart; hanya mendukung satu proses.
 - **Email** pada register diterima server tetapi tidak dikirim dan tidak dipakai UI.

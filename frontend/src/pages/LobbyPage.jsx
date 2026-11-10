@@ -32,7 +32,7 @@ const s = {
 
 export default function LobbyPage() {
   const navigate  = useNavigate()
-  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted } = useGameStore()
+  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted, error, clearError } = useGameStore()
   const [kickTarget, setKickTarget] = useState(null)   // id pemain yang menunggu konfirmasi Kick
   const [joinInput, setJoinInput] = useState('')
   const [maxGames, setMaxGames]   = useState(4)
@@ -64,6 +64,13 @@ export default function LobbyPage() {
     if (!setResult) useGameStore.getState().setSetResult(result)
     navigate('/result', { replace: true })
   }, [mustBeOnScoreboard])
+
+  // Server errors (wrong code, full room, cannot start...) disappear on their own after a few seconds.
+  useEffect(() => {
+    if (!error) return
+    const timer = setTimeout(clearError, 4000)
+    return () => clearTimeout(timer)
+  }, [error])
 
   // Exit Room gagal → aktifkan kembali tombol dan tampilkan pesan.
   useEffect(() => {
@@ -126,7 +133,7 @@ export default function LobbyPage() {
         </div>
       </div>
 
-      {localErr && <div style={s.err}>{localErr}</div>}
+      {(localErr || error) && <div role="alert" style={s.err}>{localErr || error}</div>}
 
       {/* No room yet */}
       {!myRoom && (

@@ -7,6 +7,7 @@ import {
   routeForRestoredState, messageForSessionNone,
 } from '../utils/session'
 import { messageForKickError } from '../utils/kick'
+import { messageForServerError } from '../utils/serverErrors'
 
 const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
 
@@ -138,7 +139,7 @@ export function useSocket() {
     })
 
     s.on('error', ({ code }) => {
-      setError(code)
+      setError(messageForServerError(code))
       setTimeout(() => useGameStore.getState().clearError(), 3000)
     })
 
@@ -247,7 +248,7 @@ export function useSocket() {
         st.pushEvent({ type: 'return_room_error', code })
         return
       }
-      setError(`Gagal kembali ke room: ${code}`)
+      setError(`Gagal kembali ke room: ${messageForServerError(code)}`)
       useGameStore.getState().pushEvent({ type: 'return_room_error', code })
     })
 
@@ -273,7 +274,7 @@ export function useSocket() {
 
     s.on('leave_room_error', ({ code }) => {
       debugLog('LEAVE_ROOM_FAILED', { code })
-      setError(`Gagal keluar dari room: ${code}`)
+      setError(`Gagal keluar dari room: ${messageForServerError(code)}`)
       // ResultPage akan kembali mengaktifkan tombol melalui store event.
       useGameStore.getState().pushEvent({ type: 'leave_room_error', code })
     })

@@ -1,0 +1,53 @@
+// Prepares and runs the sync.sim test with plain Node, so it behaves the same on Windows, macOS and Linux
+// (no bash, sed or mktemp needed):
+//   node tests/sync.sim/main.mjs        (from the frontend folder)
+//
+// It builds a temp folder with the REAL source files (useSocket.js, gameStore.js, utils) rewritten so their imports
+// point at the fake socket / react / router stubs, then runs run.mjs from there. The rewrite rules are the same
+// ones the old run.sh applied with sed (first match per line, in this order).
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
+
+const HERE = path.dirname(fileURLToPath(import.meta.url))
+const SRC = path.join(HERE, '../../src')
+
+// Regex sources mirror the sed patterns exactly (including their unescaped dots).
+const RULES = [
+  [/from 'zustand'/, "from '../stubs/zustand.mjs'"],
+  [/from 'react'/, "from '../stubs/react.mjs'"],
+  [/from 'socket.io-client'/, "from '../stubs/sio.mjs'"],
+  [/from 'react-router-dom'/, "from '../stubs/router.mjs'"],
+  [/'..\/store\/gameStore'/, "'../store/gameStore.mjs'"],
+  [/'..\/utils\/session'/, "'../utils/session.mjs'"],
+  [/'..\/utils\/kick'/, "'../utils/kick.mjs'"],
+  [/'..\/utils\/serverErrors'/, "'../utils/serverErrors.mjs'"],
+  [/import.meta.env.VITE_SERVER_URL/, 'undefined'],
+]
+const FILES = ['hooks/useSocket', 'store/gameStore', 'utils/session', 'utils/kick', 'utils/serverErrors']
+
+/** sed-like rewrite: every rule is applied once per line, in order. Line endings are left untouched. */
+export function rewrite(text) {
+  return text.split('\n').map(line => RULES.reduce((l, [re, to]) => l.replace(re, to), line)).join('\n')
+}
+
+export function prepare() {
+  const OUT = fs.mkdtempSync(path.join(os.tmpdir(), 'martil-sync-'))
+  for (const d of ['hooks', 'store', 'utils', 'stubs']) fs.mkdirSync(path.join(OUT, d))
+  for (const f of fs.readdirSync(path.join(HERE, 'stubs'))) if (f.endsWith('.mjs')) fs.copyFileSync(path.join(HERE, 'stubs', f), path.join(OUT, 'stubs', f))
+  fs.copyFileSync(path.join(HERE, 'run.mjs'), path.join(OUT, 'run.mjs'))
+  fs.copyFileSync(path.join(HERE, 'fixture-restored-waiting.json'), path.join(OUT, 'fixture-restored-waiting.json'))
+  for (const f of FILES) fs.writeFileSync(path.join(OUT, `${f}.mjs`), rewrite(fs.readFileSync(path.join(SRC, `${f}.js`), 'utf8')))
+  return OUT
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const OUT = prepare()
+  const r = spawnSync(process.execPath, [path.join(OUT, 'run.mjs')], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
+  const show = (s) => s.split(/\r?\n/).filter(l => l !== '' && !/warning/i.test(l)).forEach(l => console.log(l))
+  show(r.stdout || ''); show(r.stderr || '')
+  if (!process.env.KEEP_TMP) fs.rmSync(OUT, { recursive: true, force: true })
+  process.exit(r.status ?? 1)
+}

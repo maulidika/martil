@@ -1,0 +1,16 @@
+diff --git a/frontend/tests/server-errors/run.sh b/frontend/tests/server-errors/run.sh
+index b278a9e..25e0317 100644
+--- a/frontend/tests/server-errors/run.sh
++++ b/frontend/tests/server-errors/run.sh
+@@ -1,9 +1,5 @@
+ #!/usr/bin/env bash
+-# Tests utils/serverErrors.js (REAL file) and checks it against the error codes the REAL backend can send.
+-# Needs only Node: no browser, no node_modules.
++# Thin wrapper around the standalone test (works the same without bash: `node tests/server-errors/run.mjs`).
+ #   bash tests/server-errors/run.sh      (from the frontend folder)
+ set -euo pipefail
+-HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
+-cp "$SRC/utils/serverErrors.js" "$OUT/serverErrors.mjs"
+-cp "$HERE/run.mjs" "$OUT/run.mjs"
+-BACKEND_SRC="$(cd "$HERE/../../../backend/src" && pwd)" node "$OUT/run.mjs"
++exec node "$(cd "$(dirname "$0")" && pwd)/run.mjs"

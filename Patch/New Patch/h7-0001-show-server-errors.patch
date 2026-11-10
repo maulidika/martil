@@ -1,0 +1,365 @@
+diff --git a/frontend/src/hooks/useSocket.js b/frontend/src/hooks/useSocket.js
+index 7071e02..ec15980 100644
+--- a/frontend/src/hooks/useSocket.js
++++ b/frontend/src/hooks/useSocket.js
+@@ -7,6 +7,7 @@ import {
+   routeForRestoredState, messageForSessionNone,
+ } from '../utils/session'
+ import { messageForKickError } from '../utils/kick'
++import { messageForServerError } from '../utils/serverErrors'
+ 
+ const SERVER = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001'
+ 
+@@ -138,7 +139,7 @@ export function useSocket() {
+     })
+ 
+     s.on('error', ({ code }) => {
+-      setError(code)
++      setError(messageForServerError(code))
+       setTimeout(() => useGameStore.getState().clearError(), 3000)
+     })
+ 
+@@ -247,7 +248,7 @@ export function useSocket() {
+         st.pushEvent({ type: 'return_room_error', code })
+         return
+       }
+-      setError(`Gagal kembali ke room: ${code}`)
++      setError(`Gagal kembali ke room: ${messageForServerError(code)}`)
+       useGameStore.getState().pushEvent({ type: 'return_room_error', code })
+     })
+ 
+@@ -273,7 +274,7 @@ export function useSocket() {
+ 
+     s.on('leave_room_error', ({ code }) => {
+       debugLog('LEAVE_ROOM_FAILED', { code })
+-      setError(`Gagal keluar dari room: ${code}`)
++      setError(`Gagal keluar dari room: ${messageForServerError(code)}`)
+       // ResultPage akan kembali mengaktifkan tombol melalui store event.
+       useGameStore.getState().pushEvent({ type: 'leave_room_error', code })
+     })
+diff --git a/frontend/src/pages/GamePage.jsx b/frontend/src/pages/GamePage.jsx
+index 566fee5..8163f14 100644
+--- a/frontend/src/pages/GamePage.jsx
++++ b/frontend/src/pages/GamePage.jsx
+@@ -19,7 +19,7 @@ const C = { deep:'#0f3460', accent:'#e94560', border:'#1a4a7a' }
+ export default function GamePage() {
+   const navigate = useNavigate()
+   const { user, roomCode, gameState, currentTurn, selectedIds,
+-          setSelection, clearSelection, events, roomInfo, connected, setError } = useGameStore()
++          setSelection, clearSelection, events, roomInfo, connected, setError, error, clearError } = useGameStore()
+ 
+   const currentRoomCode = roomCode || roomInfo?.code
+   const myTurn   = currentTurn === user?.id
+@@ -107,6 +107,13 @@ export default function GamePage() {
+     toastRef.current = setTimeout(() => setToast(null), 2800)
+   }, [events[0]?._id])
+ 
++  // Errors disappear on their own after a few seconds (a new error restarts the timer).
++  useEffect(() => {
++    if (!error) return
++    const timer = setTimeout(clearError, 4000)
++    return () => clearTimeout(timer)
++  }, [error])
++
+   /* ── actions ─────────────────────────────────────────────── */
+   // Fungsi biasa (bukan useCallback): selalu memakai ui/seleksi terbaru dari render ini.
+   const handlePlay = () => {
+@@ -181,6 +188,16 @@ export default function GamePage() {
+         }}>{toast}</div>
+       )}
+ 
++      {/* Error from the server or from a rejected local action (e.g. "Bukan giliranmu") */}
++      {error && (
++        <div role="alert" data-testid="game-error" style={{
++          position:'fixed', top:(toast ? 52 : 12), left:'50%', transform:'translateX(-50%)',
++          background:'rgba(120,20,40,0.94)', color:'#fff', fontSize:13, fontWeight:600,
++          padding:'8px 18px', borderRadius:24, zIndex:998, maxWidth:'92vw', textAlign:'center',
++          pointerEvents:'none', border:'1px solid rgba(255,120,140,0.6)',
++        }}>{error}</div>
++      )}
++
+       {/* Area meja: info, AUTO, kursi lawan, kartu di meja */}
+       <div style={{ position:'relative', flex:1, minHeight:0 }}>
+         <div style={{ position:'absolute', left:12, top:10 }}>
+diff --git a/frontend/src/pages/LobbyPage.jsx b/frontend/src/pages/LobbyPage.jsx
+index 5892f26..2fc140f 100644
+--- a/frontend/src/pages/LobbyPage.jsx
++++ b/frontend/src/pages/LobbyPage.jsx
+@@ -32,7 +32,7 @@ const s = {
+ 
+ export default function LobbyPage() {
+   const navigate  = useNavigate()
+-  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted } = useGameStore()
++  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted, error, clearError } = useGameStore()
+   const [kickTarget, setKickTarget] = useState(null)   // id pemain yang menunggu konfirmasi Kick
+   const [joinInput, setJoinInput] = useState('')
+   const [maxGames, setMaxGames]   = useState(4)
+@@ -65,6 +65,13 @@ export default function LobbyPage() {
+     navigate('/result', { replace: true })
+   }, [mustBeOnScoreboard])
+ 
++  // Server errors (wrong code, full room, cannot start...) disappear on their own after a few seconds.
++  useEffect(() => {
++    if (!error) return
++    const timer = setTimeout(clearError, 4000)
++    return () => clearTimeout(timer)
++  }, [error])
++
+   // Exit Room gagal → aktifkan kembali tombol dan tampilkan pesan.
+   useEffect(() => {
+     const ev = events[0]
+@@ -126,7 +133,7 @@ export default function LobbyPage() {
+         </div>
+       </div>
+ 
+-      {localErr && <div style={s.err}>{localErr}</div>}
++      {(localErr || error) && <div role="alert" style={s.err}>{localErr || error}</div>}
+ 
+       {/* No room yet */}
+       {!myRoom && (
+diff --git a/frontend/src/utils/serverErrors.js b/frontend/src/utils/serverErrors.js
+new file mode 100644
+index 0000000..1608614
+--- /dev/null
++++ b/frontend/src/utils/serverErrors.js
+@@ -0,0 +1,50 @@
++/**
++ * Human-readable (Indonesian) messages for the error codes the server sends on the Socket.IO `error`
++ * channel. Pure data + one function, so it is easy to test against the backend's list of codes.
++ *
++ * Host Kick errors (`kick_error`) keep their own wording in utils/kick.js (messageForKickError).
++ */
++const MESSAGES = {
++  // General
++  INVALID_PAYLOAD:       'Permintaan tidak valid. Coba lagi.',
++  INTERNAL_ERROR:        'Terjadi kesalahan di server. Coba lagi.',
++  NOT_IN_ROOM:           'Kamu tidak berada di room ini.',
++  ROOM_NOT_FOUND:        'Kode room tidak ditemukan.',
++  NOT_HOST:              'Hanya Host yang bisa melakukan ini.',
++
++  // Room
++  INVALID_MAX_GAMES:     'Jumlah game per set tidak valid. Pilih 3, 4, atau 5.',
++  ROOM_FULL:             'Room sudah penuh (4 pemain).',
++  GAME_ALREADY_STARTED:  'Game di room ini sudah dimulai.',
++  ALREADY_IN_ROOM:       'Kamu sudah berada di room ini.',
++  ALREADY_IN_OTHER_ROOM: 'Kamu masih berada di room lain. Keluar dulu dari room itu.',
++  ALREADY_STARTED:       'Set di room ini sudah dimulai.',
++  NEED_4_PLAYERS:        'Butuh tepat 4 pemain untuk memulai game.',
++  PLAYERS_NOT_READY:     'Semua pemain harus sudah berada di room sebelum game dimulai.',
++  GAME_IN_PROGRESS:      'Tidak bisa dilakukan saat pertandingan berlangsung.',
++  KICKED_FROM_ROOM:      'Kamu dikeluarkan dari room oleh Host. Kembali ke Homepage dulu untuk bergabung lagi.',
++
++  // Host Kick (also reachable on the generic channel)
++  CANNOT_KICK_SELF:      'Kamu tidak bisa mengeluarkan dirimu sendiri.',
++  TARGET_NOT_IN_ROOM:    'Pemain itu sudah tidak ada di room.',
++
++  // Game
++  NO_ACTIVE_GAME:        'Belum ada game yang berjalan.',
++  GAME_NOT_ACTIVE:       'Game ini sudah tidak aktif.',
++  GAME_STARTING:         'Game berikutnya belum dimulai. Tunggu sebentar.',
++  NOT_YOUR_TURN:         'Bukan giliranmu.',
++  NO_CARDS_SELECTED:     'Pilih kartu dulu.',
++  INVALID_CARD_IDS:      'Kartu yang dipilih tidak valid.',
++  CARD_NOT_IN_HAND:      'Kartu itu tidak ada di tanganmu.',
++  INVALID_COMBO:         'Kombinasi kartu tidak valid.',
++  CANNOT_BEAT_TABLE:     'Kombinasi tidak bisa mengalahkan kartu di meja.',
++}
++
++/** Every code this file knows a message for (used by tests to compare against the backend). */
++export const SERVER_ERROR_CODES = Object.keys(MESSAGES)
++
++/** Message to show the player for a server error code; never exposes a bare code for known errors. */
++export function messageForServerError(code) {
++  if (typeof code === 'string' && Object.hasOwn(MESSAGES, code)) return MESSAGES[code]
++  return code ? `Terjadi kesalahan (${code}).` : 'Terjadi kesalahan.'
++}
+diff --git a/frontend/tests/combo-ui/render.mjs b/frontend/tests/combo-ui/render.mjs
+index 27233d9..fd12110 100644
+--- a/frontend/tests/combo-ui/render.mjs
++++ b/frontend/tests/combo-ui/render.mjs
+@@ -200,4 +200,21 @@ t('Redesign: layar sempit menampilkan seluruh kursi, kontrol, dan umpan balik se
+   for (const l of ['SKIP', 'PLAY', 'CLEAR']) assert.ok(r.btn(l))
+ })
+ 
++// ── H7: errors are visible in Game ──
++const withError = (msg, fn) => { store.setState({ error: msg }); try { return fn() } finally { store.setState({ error: null }) } }
++t('Game: error (dari server atau aksi lokal yang ditolak) tampil sebagai alert di atas meja', () => {
++  const html = withError('Bukan giliranmu.', () => render({ myTurn: false }).html)
++  assert.match(html, /<div role="alert" data-testid="game-error"[^>]*>Bukan giliranmu\.<\/div>/)
++})
++t('Game: tanpa error tidak ada alert; tombol dan layout tidak berubah', () => {
++  const r = render()
++  assert.ok(!r.html.includes('game-error')); assert.ok(!r.html.includes('role="alert"'))
++  for (const l of ['Single', 'Pair', 'CLEAR', 'AUTO', 'SKIP', 'PLAY', 'HINT']) assert.ok(r.btn(l), `tombol ${l} tidak ada`)
++})
++t('Game: banner error tidak menangkap sentuhan (pointer-events: none) dan tidak menutupi tombol', () => {
++  const html = withError('Kartu itu tidak ada di tanganmu.', () => render().html)
++  const tag = html.slice(html.indexOf('data-testid="game-error"'), html.indexOf('>', html.indexOf('data-testid="game-error"')))
++  assert.match(tag, /pointer-events:\s*none/); assert.match(tag, /position:\s*fixed/)
++})
++
+ console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/lobby-ui/render.mjs b/frontend/tests/lobby-ui/render.mjs
+index e46ac03..71fa606 100644
+--- a/frontend/tests/lobby-ui/render.mjs
++++ b/frontend/tests/lobby-ui/render.mjs
+@@ -113,4 +113,20 @@ t('Room: tidak ada pemilih jumlah game; jumlah game Room ditampilkan apa adanya
+   }
+ })
+ 
++// ── H7: errors from the server are visible ──
++// The render helpers above reset the store from `base`, so the error is injected through `base`.
++const withError = (msg, render) => { base.error = msg; try { return render() } finally { base.error = null } }
++t('Homepage: error server ditampilkan sebagai alert (mis. kode room salah)', () => {
++  const html = withError('Kode room tidak ditemukan.', renderHomepage)
++  assert.match(html, /<div role="alert"[^>]*>Kode room tidak ditemukan\.<\/div>/)
++})
++t('Homepage: tanpa error tidak ada alert', () => {
++  assert.ok(!renderHomepage().includes('role="alert"'))
++})
++t('Room: error server (mis. Mulai Game gagal) juga ditampilkan', () => {
++  const html = withError('Butuh tepat 4 pemain untuk memulai game.', () => renderRoom(4))
++  assert.match(html, /<div role="alert"[^>]*>Butuh tepat 4 pemain untuk memulai game\.<\/div>/)
++  assert.ok(!renderRoom(4).includes('role="alert"'))
++})
++
+ console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/server-errors/run.mjs b/frontend/tests/server-errors/run.mjs
+new file mode 100644
+index 0000000..65fc05d
+--- /dev/null
++++ b/frontend/tests/server-errors/run.mjs
+@@ -0,0 +1,68 @@
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import path from 'node:path'
++import { messageForServerError, SERVER_ERROR_CODES } from './serverErrors.mjs'
++
++const BACKEND = process.env.BACKEND_SRC
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++
++// Error codes the backend can put on the socket `error` channel: every place that produces one.
++const FILES = ['rooms/roomManager.js', 'game/engine.js', 'game/cardIds.js', 'socket/socketHandler.js', 'socket/payload.js']
++const PATTERNS = [/error: '([A-Z][A-Z_0-9]+)'/g, /err\('([A-Z][A-Z_0-9]+)'\)/g, /return '([A-Z][A-Z_0-9]+)'/g, /emitRejection\([^)]*'([A-Z][A-Z_0-9]+)'\)/g]
++const backendCodes = new Set()
++for (const f of FILES) {
++  const src = fs.readFileSync(path.join(BACKEND, f), 'utf8')
++  for (const re of PATTERNS) for (const m of src.matchAll(re)) backendCodes.add(m[1])
++}
++// Not `error` events: these are `session_none` reasons (shown as a notice, not through this map).
++const SESSION_REASONS = new Set(['NO_ROOM', 'EXPIRED', 'KICKED', 'ROOM_CLOSED'])
++const userFacing = [...backendCodes].filter(c => !SESSION_REASONS.has(c)).sort()
++
++t('pemindaian backend menemukan kode error (bukan daftar kosong)', () => {
++  assert.ok(userFacing.length >= 20, `hanya ${userFacing.length} kode ditemukan: pemindaian rusak?`)
++  for (const known of ['NOT_YOUR_TURN', 'ROOM_NOT_FOUND', 'INVALID_PAYLOAD', 'GAME_STARTING', 'INVALID_MAX_GAMES']) assert.ok(backendCodes.has(known), known)
++})
++
++t('setiap kode error yang bisa dikirim backend punya pesan Indonesia', () => {
++  const missing = userFacing.filter(c => !SERVER_ERROR_CODES.includes(c))
++  assert.deepEqual(missing, [], `kode tanpa pesan: ${missing.join(', ')}`)
++})
++
++t('tidak ada pesan untuk kode yang sudah tidak ada di backend (peta tidak basi)', () => {
++  const stale = SERVER_ERROR_CODES.filter(c => !backendCodes.has(c))
++  assert.deepEqual(stale, [], `kode basi: ${stale.join(', ')}`)
++})
++
++t('setiap pesan: string tidak kosong, diakhiri titik, dan tidak membocorkan kode mentah', () => {
++  for (const code of SERVER_ERROR_CODES) {
++    const msg = messageForServerError(code)
++    assert.equal(typeof msg, 'string'); assert.ok(msg.length >= 8, code)
++    assert.ok(msg.endsWith('.'), `${code}: pesan harus diakhiri titik`)
++    assert.ok(!msg.includes(code), `${code}: pesan tidak boleh memuat kode mentah`)
++  }
++})
++
++t('pesan berbeda untuk kode berbeda (tidak ada salin-tempel)', () => {
++  const msgs = SERVER_ERROR_CODES.map(messageForServerError)
++  assert.equal(new Set(msgs).size, msgs.length)
++})
++
++t('kode tidak dikenal: pesan cadangan memuat kodenya; kosong/bukan string: pesan umum', () => {
++  assert.equal(messageForServerError('SOMETHING_NEW'), 'Terjadi kesalahan (SOMETHING_NEW).')
++  for (const v of [undefined, null, '', 0]) assert.equal(messageForServerError(v), 'Terjadi kesalahan.')
++})
++
++t('nama properti bawaan Object tidak dianggap kode (toString, constructor, __proto__)', () => {
++  for (const k of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) assert.equal(messageForServerError(k), `Terjadi kesalahan (${k}).`, k)
++})
++
++t('pesan INVALID_MAX_GAMES menyebut persis nilai yang diizinkan server', () => {
++  const rm = fs.readFileSync(path.join(BACKEND, 'rooms/roomManager.js'), 'utf8')
++  const allowed = rm.match(/ALLOWED_MAX_GAMES = Object\.freeze\(\[([^\]]+)\]\)/)[1].split(',').map(s => s.trim())
++  const msg = messageForServerError('INVALID_MAX_GAMES')
++  for (const n of allowed) assert.ok(msg.includes(n), `pesan tidak menyebut ${n}`)
++  assert.ok(!/\b6\b/.test(msg))
++})
++
++console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/server-errors/run.sh b/frontend/tests/server-errors/run.sh
+new file mode 100644
+index 0000000..b278a9e
+--- /dev/null
++++ b/frontend/tests/server-errors/run.sh
+@@ -0,0 +1,9 @@
++#!/usr/bin/env bash
++# Tests utils/serverErrors.js (REAL file) and checks it against the error codes the REAL backend can send.
++# Needs only Node: no browser, no node_modules.
++#   bash tests/server-errors/run.sh      (from the frontend folder)
++set -euo pipefail
++HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
++cp "$SRC/utils/serverErrors.js" "$OUT/serverErrors.mjs"
++cp "$HERE/run.mjs" "$OUT/run.mjs"
++BACKEND_SRC="$(cd "$HERE/../../../backend/src" && pwd)" node "$OUT/run.mjs"
+diff --git a/frontend/tests/sync.sim/run.mjs b/frontend/tests/sync.sim/run.mjs
+index 4183a36..6e4fd9f 100644
+--- a/frontend/tests/sync.sim/run.mjs
++++ b/frontend/tests/sync.sim/run.mjs
+@@ -238,6 +238,28 @@ t('kick_error → pesan error yang ramah (bukan kode mentah)', () => {
+   s2.fire('kick_error', { code: 'GAME_IN_PROGRESS' }); assert.match(st().error, /pertandingan berlangsung/)
+   st().clearError()
+ })
++t('error dari server → pesan Indonesia di store (bukan kode mentah)', () => {
++  for (const [code, re] of [['NOT_YOUR_TURN', /^Bukan giliranmu\.$/], ['ROOM_NOT_FOUND', /Kode room tidak ditemukan/], ['ROOM_FULL', /sudah penuh/], ['NEED_4_PLAYERS', /tepat 4 pemain/], ['GAME_STARTING', /belum dimulai/], ['ALREADY_IN_OTHER_ROOM', /room lain/]]) {
++    s2.fire('error', { code })
++    assert.match(st().error, re, code); assert.ok(!st().error.includes(code), `${code} bocor ke pesan`)
++    st().clearError()
++  }
++})
++t('error dengan kode baru/tidak dikenal tetap tampil (pesan cadangan memuat kodenya)', () => {
++  s2.fire('error', { code: 'BRAND_NEW_CODE' }); assert.equal(st().error, 'Terjadi kesalahan (BRAND_NEW_CODE).')
++  st().clearError()
++})
++t('error server menghilang sendiri setelah 3 detik (perilaku lama tetap)', () => {
++  s2.fire('error', { code: 'NOT_YOUR_TURN' }); assert.ok(st().error)
++  tick(3100); assert.equal(st().error, null)
++})
++t('leave_room_error dan return_room_error: prefix lama + alasan yang ramah', () => {
++  s2.fire('leave_room_error', { code: 'GAME_IN_PROGRESS' })
++  assert.equal(st().error, 'Gagal keluar dari room: Tidak bisa dilakukan saat pertandingan berlangsung.')
++  s2.fire('return_room_error', { code: 'NOT_IN_ROOM' })
++  assert.equal(st().error, 'Gagal kembali ke room: Kamu tidak berada di room ini.')
++  st().clearError()
++})
+ t('logout membersihkan pembatasan; listener Kick tidak ganda', () => {
+   st().setRestricted(true); st().openRestrictedModal(); st().logout()
+   assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false)
+diff --git a/frontend/tests/sync.sim/run.sh b/frontend/tests/sync.sim/run.sh
+index bd9051b..c8bf309 100644
+--- a/frontend/tests/sync.sim/run.sh
++++ b/frontend/tests/sync.sim/run.sh
+@@ -6,10 +6,10 @@ set -euo pipefail
+ HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
+ mkdir -p "$OUT/hooks" "$OUT/store" "$OUT/utils" "$OUT/stubs"
+ cp "$HERE"/stubs/*.mjs "$OUT/stubs/"; cp "$HERE/run.mjs" "$OUT/run.mjs"; cp "$HERE/fixture-restored-waiting.json" "$OUT/"
+-for f in hooks/useSocket store/gameStore utils/session utils/kick; do
++for f in hooks/useSocket store/gameStore utils/session utils/kick utils/serverErrors; do
+   sed -e "s#from 'zustand'#from '../stubs/zustand.mjs'#" -e "s#from 'react'#from '../stubs/react.mjs'#" \
+       -e "s#from 'socket.io-client'#from '../stubs/sio.mjs'#" -e "s#from 'react-router-dom'#from '../stubs/router.mjs'#" \
+-      -e "s#'../store/gameStore'#'../store/gameStore.mjs'#" -e "s#'../utils/session'#'../utils/session.mjs'#" -e "s#'../utils/kick'#'../utils/kick.mjs'#" \
++      -e "s#'../store/gameStore'#'../store/gameStore.mjs'#" -e "s#'../utils/session'#'../utils/session.mjs'#" -e "s#'../utils/kick'#'../utils/kick.mjs'#" -e "s#'../utils/serverErrors'#'../utils/serverErrors.mjs'#" \
+       -e "s#import.meta.env.VITE_SERVER_URL#undefined#" "$SRC/$f.js" > "$OUT/$f.mjs"
+ done
+ node "$OUT/run.mjs" 2>&1 | grep -v -i warning

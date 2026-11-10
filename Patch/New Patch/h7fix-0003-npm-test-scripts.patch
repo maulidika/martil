@@ -1,0 +1,15 @@
+diff --git a/frontend/package.json b/frontend/package.json
+index ee38edf..0284cbe 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -6,7 +6,9 @@
+   "scripts": {
+     "dev": "vite",
+     "build": "vite build",
+-    "preview": "vite preview"
++    "preview": "vite preview",
++    "test:sync": "node tests/sync.sim/main.mjs",
++    "test:server-errors": "node tests/server-errors/run.mjs"
+   },
+   "dependencies": {
+     "martil": "file:..",

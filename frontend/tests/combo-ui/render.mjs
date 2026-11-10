@@ -200,4 +200,21 @@ t('Redesign: layar sempit menampilkan seluruh kursi, kontrol, dan umpan balik se
   for (const l of ['SKIP', 'PLAY', 'CLEAR']) assert.ok(r.btn(l))
 })
 
+// ── H7: errors are visible in Game ──
+const withError = (msg, fn) => { store.setState({ error: msg }); try { return fn() } finally { store.setState({ error: null }) } }
+t('Game: error (dari server atau aksi lokal yang ditolak) tampil sebagai alert di atas meja', () => {
+  const html = withError('Bukan giliranmu.', () => render({ myTurn: false }).html)
+  assert.match(html, /<div role="alert" data-testid="game-error"[^>]*>Bukan giliranmu\.<\/div>/)
+})
+t('Game: tanpa error tidak ada alert; tombol dan layout tidak berubah', () => {
+  const r = render()
+  assert.ok(!r.html.includes('game-error')); assert.ok(!r.html.includes('role="alert"'))
+  for (const l of ['Single', 'Pair', 'CLEAR', 'AUTO', 'SKIP', 'PLAY', 'HINT']) assert.ok(r.btn(l), `tombol ${l} tidak ada`)
+})
+t('Game: banner error tidak menangkap sentuhan (pointer-events: none) dan tidak menutupi tombol', () => {
+  const html = withError('Kartu itu tidak ada di tanganmu.', () => render().html)
+  const tag = html.slice(html.indexOf('data-testid="game-error"'), html.indexOf('>', html.indexOf('data-testid="game-error"')))
+  assert.match(tag, /pointer-events:\s*none/); assert.match(tag, /position:\s*fixed/)
+})
+
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)

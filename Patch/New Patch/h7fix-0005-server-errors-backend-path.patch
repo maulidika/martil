@@ -1,0 +1,12 @@
+diff --git a/frontend/tests/server-errors/run.mjs b/frontend/tests/server-errors/run.mjs
+index 51a28aa..afef0a9 100644
+--- a/frontend/tests/server-errors/run.mjs
++++ b/frontend/tests/server-errors/run.mjs
+@@ -5,3 +5,6 @@ import { messageForServerError, SERVER_ERROR_CODES } from '../../src/utils/serve
+ 
+-const BACKEND = process.env.BACKEND_SRC
++// Runs standalone: `node tests/server-errors/run.mjs` from any folder, no environment variable needed.
++// BACKEND_SRC still overrides the backend location when set.
++const { fileURLToPath } = await import('node:url')
++const BACKEND = process.env.BACKEND_SRC || fileURLToPath(new URL('../../../backend/src/', import.meta.url))
+ let pass = 0, fail = 0

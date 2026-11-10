@@ -1,0 +1,35 @@
+diff --git a/frontend/tests/server-errors/run.mjs b/frontend/tests/server-errors/run.mjs
+index 65fc05d..afef0a9 100644
+--- a/frontend/tests/server-errors/run.mjs
++++ b/frontend/tests/server-errors/run.mjs
+@@ -1,9 +1,12 @@
+ import assert from 'node:assert/strict'
+ import fs from 'node:fs'
+ import path from 'node:path'
+-import { messageForServerError, SERVER_ERROR_CODES } from './serverErrors.mjs'
++import { messageForServerError, SERVER_ERROR_CODES } from '../../src/utils/serverErrors.js'
+ 
+-const BACKEND = process.env.BACKEND_SRC
++// Runs standalone: `node tests/server-errors/run.mjs` from any folder, no environment variable needed.
++// BACKEND_SRC still overrides the backend location when set.
++const { fileURLToPath } = await import('node:url')
++const BACKEND = process.env.BACKEND_SRC || fileURLToPath(new URL('../../../backend/src/', import.meta.url))
+ let pass = 0, fail = 0
+ const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
+ 
+diff --git a/frontend/tests/server-errors/run.sh b/frontend/tests/server-errors/run.sh
+index b278a9e..25e0317 100644
+--- a/frontend/tests/server-errors/run.sh
++++ b/frontend/tests/server-errors/run.sh
+@@ -1,9 +1,5 @@
+ #!/usr/bin/env bash
+-# Tests utils/serverErrors.js (REAL file) and checks it against the error codes the REAL backend can send.
+-# Needs only Node: no browser, no node_modules.
++# Thin wrapper around the standalone test (works the same without bash: `node tests/server-errors/run.mjs`).
+ #   bash tests/server-errors/run.sh      (from the frontend folder)
+ set -euo pipefail
+-HERE="$(cd "$(dirname "$0")" && pwd)"; SRC="$HERE/../../src"; OUT="$(mktemp -d)"
+-cp "$SRC/utils/serverErrors.js" "$OUT/serverErrors.mjs"
+-cp "$HERE/run.mjs" "$OUT/run.mjs"
+-BACKEND_SRC="$(cd "$HERE/../../../backend/src" && pwd)" node "$OUT/run.mjs"
++exec node "$(cd "$(dirname "$0")" && pwd)/run.mjs"

@@ -113,4 +113,20 @@ t('Room: tidak ada pemilih jumlah game; jumlah game Room ditampilkan apa adanya 
   }
 })
 
+// ── H7: errors from the server are visible ──
+// The render helpers above reset the store from `base`, so the error is injected through `base`.
+const withError = (msg, render) => { base.error = msg; try { return render() } finally { base.error = null } }
+t('Homepage: error server ditampilkan sebagai alert (mis. kode room salah)', () => {
+  const html = withError('Kode room tidak ditemukan.', renderHomepage)
+  assert.match(html, /<div role="alert"[^>]*>Kode room tidak ditemukan\.<\/div>/)
+})
+t('Homepage: tanpa error tidak ada alert', () => {
+  assert.ok(!renderHomepage().includes('role="alert"'))
+})
+t('Room: error server (mis. Mulai Game gagal) juga ditampilkan', () => {
+  const html = withError('Butuh tepat 4 pemain untuk memulai game.', () => renderRoom(4))
+  assert.match(html, /<div role="alert"[^>]*>Butuh tepat 4 pemain untuk memulai game\.<\/div>/)
+  assert.ok(!renderRoom(4).includes('role="alert"'))
+})
+
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)

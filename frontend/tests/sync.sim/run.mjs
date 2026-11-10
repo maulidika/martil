@@ -238,6 +238,28 @@ t('kick_error → pesan error yang ramah (bukan kode mentah)', () => {
   s2.fire('kick_error', { code: 'GAME_IN_PROGRESS' }); assert.match(st().error, /pertandingan berlangsung/)
   st().clearError()
 })
+t('error dari server → pesan Indonesia di store (bukan kode mentah)', () => {
+  for (const [code, re] of [['NOT_YOUR_TURN', /^Bukan giliranmu\.$/], ['ROOM_NOT_FOUND', /Kode room tidak ditemukan/], ['ROOM_FULL', /sudah penuh/], ['NEED_4_PLAYERS', /tepat 4 pemain/], ['GAME_STARTING', /belum dimulai/], ['ALREADY_IN_OTHER_ROOM', /room lain/]]) {
+    s2.fire('error', { code })
+    assert.match(st().error, re, code); assert.ok(!st().error.includes(code), `${code} bocor ke pesan`)
+    st().clearError()
+  }
+})
+t('error dengan kode baru/tidak dikenal tetap tampil (pesan cadangan memuat kodenya)', () => {
+  s2.fire('error', { code: 'BRAND_NEW_CODE' }); assert.equal(st().error, 'Terjadi kesalahan (BRAND_NEW_CODE).')
+  st().clearError()
+})
+t('error server menghilang sendiri setelah 3 detik (perilaku lama tetap)', () => {
+  s2.fire('error', { code: 'NOT_YOUR_TURN' }); assert.ok(st().error)
+  tick(3100); assert.equal(st().error, null)
+})
+t('leave_room_error dan return_room_error: prefix lama + alasan yang ramah', () => {
+  s2.fire('leave_room_error', { code: 'GAME_IN_PROGRESS' })
+  assert.equal(st().error, 'Gagal keluar dari room: Tidak bisa dilakukan saat pertandingan berlangsung.')
+  s2.fire('return_room_error', { code: 'NOT_IN_ROOM' })
+  assert.equal(st().error, 'Gagal kembali ke room: Kamu tidak berada di room ini.')
+  st().clearError()
+})
 t('logout membersihkan pembatasan; listener Kick tidak ganda', () => {
   st().setRestricted(true); st().openRestrictedModal(); st().logout()
   assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false)
