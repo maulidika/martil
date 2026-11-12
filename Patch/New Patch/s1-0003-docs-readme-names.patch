@@ -1,0 +1,90 @@
+diff --git a/README.md b/README.md
+index 40f2ec5..4502d9d 100644
+--- a/README.md
++++ b/README.md
+@@ -21,6 +21,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
+ | Validasi `cardIds`, guard payload Socket.IO, timer giliran yang tidak bisa direset aksi ditolak, perlindungan jeda antar-game | ✅ Tersedia |
+ | Jumlah game per set: hanya 3, 4, atau 5 (UI dan validasi server) | ✅ Tersedia |
+ | Satu akun hanya boleh menjadi anggota satu Room pada satu waktu (validasi server) | ✅ Tersedia |
++| Nama asli (username) pemain tampil di Room, Game, dan Result (bukan ID acak) | ✅ Tersedia |
+ | Pesan error server tampil di UI dalam bahasa Indonesia (Homepage, Room, Game, Result) | ✅ Tersedia |
+ | Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
+ | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
+@@ -91,7 +92,7 @@ martil-main/
+ │
+ ├── backend/
+ │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
+-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom
++│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles
+ │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
+ │   ├── src/
+ │   │   ├── server.js            ← entry point Express + Socket.IO
+@@ -112,7 +113,7 @@ martil-main/
+ │   └── tests/
+ │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
+ │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
+-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js
++│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js
+ │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
+ │
+ └── frontend/
+@@ -125,9 +126,9 @@ martil-main/
+     │   ├── pages/               ← LoginPage, LobbyPage (Homepage + Room), GamePage, ResultPage
+     │   ├── components/          ← Modal, ConnectionOverlay, GameSyncWaiting, game/ui.jsx (tampilan meja)
+     │   └── utils/               ← comboDetector, comboPicker, groupChain, handUi (logika tangan),
+-    │                              gameLayout (ukuran/posisi kursi), profile (data profil sementara),
++    │                              gameLayout (ukuran/posisi kursi), profile (nama pemain + data profil sementara), gameToast,
+     │                              session, kick, serverErrors (pesan error server) (logika murni untuk UI)
+-    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui, lobby-ui, server-errors (bash), browser (Playwright, opsional)
++    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui, lobby-ui, server-errors, player-names (bash/Node), browser (Playwright, opsional)
+ ```
+ 
+ ---
+@@ -303,6 +304,8 @@ Koneksi memakai token JWT di handshake (`auth.token`); tanpa token valid koneksi
+ 
+ Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kartu sendiri + jumlah kartu lawan).
+ 
++**Nama pemain (profil publik).** Setiap state Room (`room_updated`, `game_state`, `session_restored`) membawa `profiles`: peta `{ [idPemain]: { username } }` untuk pemain yang sedang ada di Room. Daftar field bersifat eksplisit (hanya `username`): email, hash password, token, dan klaim lain tidak pernah dikirim. Username diambil dari token login yang diverifikasi server (bukan dari klien), dibersihkan (string, di-trim, 1–30 karakter), dan bila tidak valid pemain itu tidak punya profil sehingga UI memakai ID singkat 8 karakter. ID internal pemain tetap UUID dan tidak bergantung pada username (peta selalu menurut ID, bukan menurut nama). Nama juga dibekukan di hasil set (`set_over.profiles` dan `setResult.profiles`), jadi halaman Result tetap benar walau pemain sudah keluar atau di-Kick. `players` tetap berbentuk `{ id, connected, inRoom }`; nama tidak digandakan di sana.
++
+ ### Validasi input, timer giliran, dan kode error
+ 
+ **Payload.** Setiap handler membaca payload lewat guard (`socket/payload.js`): payload harus berupa objek, dan `roomCode` / `targetId`, bila ada, harus string maksimal 64 karakter. Bentuk yang salah dijawab `INVALID_PAYLOAD` pada kanal yang sama dengan penolakan event itu: `leave_room_error` + `error` untuk `leave_room`, `return_room_error` + `error` untuk `return_to_room`, `kick_error` untuk `kick_player`, dan `error` untuk event lain. Field yang tidak dikirim tetap memakai kode lama (`NOT_IN_ROOM`, `ROOM_NOT_FOUND`). `create_room` tanpa payload tetap diterima. `maxGames` pada `create_room` harus tepat angka 3, 4, atau 5 (string seperti `"4"`, pecahan, `NaN`, `null`, dan nilai lain ditolak `INVALID_MAX_GAMES` tanpa membuat Room dan tanpa mengubah state apa pun). Exception tak terduga di handler ditangkap, dicatat dengan stack di log server, dan pengirim menerima `INTERNAL_ERROR`; server tetap berjalan.
+@@ -367,6 +370,7 @@ npm run test:timer   # aksi ditolak tidak menyentuh timer giliran (spy setTimeou
+ npm run test:intermission  # play/skip ditolak GAME_STARTING selama jeda antar-game
+ npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepat waktunya
+ npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
++npm run test:profiles  # profil publik: nama di setiap state Room, daftar putih field, pembersihan username, pembekuan nama di hasil set
+ npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
+ npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
+ ```
+@@ -379,10 +383,11 @@ bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render
+ bash tests/kick-ui/run.sh     # logika Kick; render ResultPage/LobbyPage
+ bash tests/lobby-ui/run.sh    # render Homepage/Room: pilihan jumlah game per set 3, 4, 5 dan tampilan error server
+ bash tests/server-errors/run.sh  # peta pesan error vs semua kode error yang bisa dikirim backend (tanpa browser)
++bash tests/player-names/run.sh   # nama pemain di UI: prioritas sumber nama, pesan toast, dan penjaga agar tidak ada pemotongan ID manual
+ ```
+ Bagian render pada `lobby-ui`, `combo-ui`, dan `kick-ui` memakai `react-dom/server`. JSX dikompilasi dengan esbuild yang dibawa Vite, jadi **TypeScript tidak dibutuhkan**. Bagian render dilewati (SKIP, exit 0, dengan pesan yang menyebut dependency yang kurang) hanya bila `frontend/node_modules` belum ada. Bila `node_modules` sudah ada tetapi react, react-dom, atau esbuild tidak ditemukan, test **GAGAL** (exit 1) agar tidak ada SKIP diam-diam; jalankan `npm install` di `frontend`.
+ 
+-**Windows / tanpa bash.** Dua tes berikut berjalan hanya dengan Node, tanpa bash dan tanpa environment variable, dari folder mana pun: `npm run test:sync` (atau `node tests/sync.sim/main.mjs`) dan `npm run test:server-errors` (atau `node tests/server-errors/run.mjs`). `node tests/lobby-ui/render.mjs` menjalankan render Homepage/Room, dan bagian render `kick-ui` dan `combo-ui` juga bisa dijalankan langsung (`node tests/kick-ui/render.mjs`, `node tests/combo-ui/render.mjs`). Skrip `run.sh` untuk `game-ui` dan bagian logika `kick-ui`/`combo-ui` masih membutuhkan bash (mis. Git Bash; `combo-ui` membuat symlink). `server-errors` membaca `backend/src` secara otomatis; variabel `BACKEND_SRC` bersifat opsional untuk menimpa lokasinya. `server-errors` mengimpor langsung file ES module `src/utils/serverErrors.js` tanpa `"type": "module"`, jadi bergantung pada deteksi sintaks module otomatis Node 22.x: terbukti jalan di v22.23.4 (sandbox) dan v22.23.1 (Windows, dilaporkan pengguna); versi Node lain belum diuji.
++**Windows / tanpa bash.** Dua tes berikut berjalan hanya dengan Node, tanpa bash dan tanpa environment variable, dari folder mana pun: `npm run test:sync` (atau `node tests/sync.sim/main.mjs`), `npm run test:server-errors` (atau `node tests/server-errors/run.mjs`), dan `npm run test:names` (atau `node tests/player-names/run.mjs`). `node tests/lobby-ui/render.mjs` menjalankan render Homepage/Room, dan bagian render `kick-ui` dan `combo-ui` juga bisa dijalankan langsung (`node tests/kick-ui/render.mjs`, `node tests/combo-ui/render.mjs`). Skrip `run.sh` untuk `game-ui` dan bagian logika `kick-ui`/`combo-ui` masih membutuhkan bash (mis. Git Bash; `combo-ui` membuat symlink). `server-errors` membaca `backend/src` secara otomatis; variabel `BACKEND_SRC` bersifat opsional untuk menimpa lokasinya. `server-errors` mengimpor langsung file ES module `src/utils/serverErrors.js` tanpa `"type": "module"`, jadi bergantung pada deteksi sintaks module otomatis Node 22.x: terbukti jalan di v22.23.4 (sandbox) dan v22.23.1 (Windows, dilaporkan pengguna); versi Node lain belum diuji.
+ 
+ **Opsional (browser nyata):** `frontend/tests/browser/` menguji `GamePage` di Chromium (butuh `esbuild`, Playwright, dan Chromium; lihat `frontend/tests/browser/README.md`).
+ 
+@@ -394,7 +399,7 @@ Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otoma
+ 
+ ## ⏳ Belum Tersedia / Placeholder
+ 
+-- **Profil pemain:** nama lawan di Room, Game, dan Result masih potongan ID acak (6–8 karakter); server belum mengirim username pemain lain. Level dan koin yang tampil di meja adalah **data dummy** turunan hash ID (`frontend/src/utils/profile.js`); avatar masih siluet bawaan yang sama untuk semua pemain (hanya warna cincinnya yang berbeda).
++- **Profil pemain (sebagian):** nama asli pemain sudah tampil (lihat Nama pemain di atas). Yang masih placeholder: level dan koin di meja adalah **data dummy** turunan hash ID (`frontend/src/utils/profile.js`), dan avatar masih siluet bawaan yang sama untuk semua pemain (hanya warna cincinnya yang berbeda). Username belum bisa diganti dan masih case-sensitive.
+ - **Taruhan/nominal Room:** lencana taruhan di layar Game adalah placeholder; server belum punya data `bet`.
+ - **Wallet / saldo:** belum ada. Tidak ada saldo, riwayat transaksi, atau pembaruan saldo setelah set.
+ - **Tombol HINT dan AUTO:** placeholder, nonaktif.
+@@ -420,7 +425,7 @@ Bagian ini hanya mendokumentasikan arah pengembangan. **Tidak satu pun poin di b
+ 
+ **A. Posisi pemain di meja.** Tampilan sudah memakai empat posisi (pemain utama di bawah, lawan kiri/atas/kanan). Rencana: arah posisi visual mengelilingi meja menjadi **berlawanan arah jarum jam**. Hanya pemetaan posisi visual yang berubah; urutan giliran dan validasi permainan tidak berubah.
+ 
+-**B. Profil pemain.** Tampilkan nama pemain asli (bukan ID acak), avatar, level, dan informasi profil. ID internal pemain tetap unik dan tidak bergantung pada username. Informasi publik pemain dikirim lewat backend dengan daftar field yang eksplisit (tanpa email/hash password). **Keputusan:** username nantinya dibuat unik dan tidak membedakan huruf besar/kecil (case-insensitive). Saat ini username masih case-sensitive.
++**B. Profil pemain.** *Sudah ada:* nama pemain asli (bukan ID acak). *Belum ada:* avatar, level, dan informasi profil lain. ID internal pemain tetap unik dan tidak bergantung pada username. Informasi publik pemain dikirim lewat backend dengan daftar field yang eksplisit (tanpa email/hash password). **Keputusan:** username nantinya dibuat unik dan tidak membedakan huruf besar/kecil (case-insensitive). Saat ini username masih case-sensitive.
+ 
+ **C. Wallet virtual (hanya untuk uji gameplay).** Saldo awal 20.000 koin virtual. Satu set terdiri dari 3, 4, atau 5 game (opsi 6 sudah dihapus dari UI dan ditolak server). Saldo hanya diperbarui setelah satu set selesai, berdasarkan peringkat akhir. **Nominal Room menskalakan perubahan saldo:**
+ 

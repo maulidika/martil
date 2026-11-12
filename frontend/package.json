@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "test:sync": "node tests/sync.sim/main.mjs",
-    "test:server-errors": "node tests/server-errors/run.mjs"
+    "test:server-errors": "node tests/server-errors/run.mjs",
+    "test:names": "node tests/player-names/run.mjs"
   },
   "dependencies": {
     "martil": "file:..",

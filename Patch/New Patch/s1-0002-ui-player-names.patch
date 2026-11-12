@@ -1,0 +1,502 @@
+diff --git a/frontend/package.json b/frontend/package.json
+index 0284cbe..8129d5c 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -8,7 +8,8 @@
+     "build": "vite build",
+     "preview": "vite preview",
+     "test:sync": "node tests/sync.sim/main.mjs",
+-    "test:server-errors": "node tests/server-errors/run.mjs"
++    "test:server-errors": "node tests/server-errors/run.mjs",
++    "test:names": "node tests/player-names/run.mjs"
+   },
+   "dependencies": {
+     "martil": "file:..",
+diff --git a/frontend/src/pages/GamePage.jsx b/frontend/src/pages/GamePage.jsx
+index 8163f14..ab4c795 100644
+--- a/frontend/src/pages/GamePage.jsx
++++ b/frontend/src/pages/GamePage.jsx
+@@ -8,7 +8,8 @@ import { COMBO_TYPES, listAvailableCombos, activePickOf } from '../utils/comboPi
+ import { mainDeckIds, isGroupSelected, anchorAbove, canGroupSelection } from '../utils/groupChain'
+ import { INITIAL_UI, syncUi, reduceHandUi } from '../utils/handUi'
+ import { computeLayout, seatSides, orderOpponents, turnRingPct } from '../utils/gameLayout'
+-import { getProfile, betLabel } from '../utils/profile'
++import { getProfile, playerName, betLabel } from '../utils/profile'
++import { toastMsg } from '../utils/gameToast'
+ import {
+   T, TableSurface, PlayerSeat, MyBadge, PlayingCard, DetectorPills, ClearButton, PlayButton, RoundButton, BetBadge, InfoPanel,
+ } from '../components/game/ui'
+@@ -22,6 +23,8 @@ export default function GamePage() {
+           setSelection, clearSelection, events, roomInfo, connected, setError, error, clearError } = useGameStore()
+ 
+   const currentRoomCode = roomCode || roomInfo?.code
++  // Display name of another player (real username from the server profiles; 'kamu' for yourself).
++  const nameOf = (id) => id === user?.id ? 'kamu' : playerName(id, { profiles: roomInfo?.profiles })
+   const myTurn   = currentTurn === user?.id
+   const myHand   = gameState?.myHand ? sortHand(gameState.myHand) : []
+   const handIds  = myHand.map(c => c.id)
+@@ -100,7 +103,7 @@ export default function GamePage() {
+   useEffect(() => {
+     const latest = events[0]
+     if (!latest) return
+-    const msg = toastMsg(latest, user?.id)
++    const msg = toastMsg(latest, user?.id, nameOf)
+     if (!msg) return
+     setToast(msg)
+     clearTimeout(toastRef.current)
+@@ -146,10 +149,9 @@ export default function GamePage() {
+   const opponents = orderOpponents(gameState.opponents || [], (roomInfo?.players || []).map(p => p.id), user?.id)
+   const sides     = seatSides(opponents.length)
+   const ringPct   = turnRingPct(timeLeft)
+-  const me        = getProfile(user?.id, user)
++  const me        = getProfile(user?.id, user, roomInfo?.profiles)
+   const font      = L.seatFont
+   const bet       = betLabel(roomInfo)
+-  const nameOf    = (id) => id === user?.id ? 'kamu' : getProfile(id).name
+   const detectorTypes = COMBO_TYPES.filter(t => available[t.key]?.length)
+   const onPick    = (kind) => act({ type: 'detector', available, kind })
+   const topSeatH  = L.seatH                                    // tinggi kursi atas; area meja berada di bawahnya
+@@ -206,7 +208,7 @@ export default function GamePage() {
+         <div style={{ position:'absolute', right:12, top:10 }}>{autoBtn}</div>
+ 
+         {opponents.map((op, i) => {
+-          const profile = getProfile(op.id)
++          const profile = getProfile(op.id, undefined, roomInfo?.profiles)
+           const side = sides[i]
+           return (
+             <div key={op.id} style={compact
+@@ -380,13 +382,3 @@ function useViewport() {
+   return vp
+ }
+ 
+-function toastMsg(ev, myId) {
+-  switch (ev.type) {
+-    case 'rally_ended':       return '🧹 Rally selesai — meja bersih'
+-    case 'game_over':         return ev.winnerId === myId ? '🎉 Kamu menang game ini!' : `🏆 ${ev.winnerId?.slice(0,6)} menang`
+-    case 'auto_skipped':      return ev.playerId === myId ? '⏰ Waktu habis — auto skip' : `⏰ Auto skip (${ev.playerId?.slice(0,6)})`
+-    case 'player_disconnected': return `📡 ${ev.playerId?.slice(0,6)} terputus`
+-    case 'player_reconnected':  return `✅ ${ev.playerId?.slice(0,6)} kembali`
+-    default: return null
+-  }
+-}
+diff --git a/frontend/src/pages/LobbyPage.jsx b/frontend/src/pages/LobbyPage.jsx
+index 2fc140f..79d1370 100644
+--- a/frontend/src/pages/LobbyPage.jsx
++++ b/frontend/src/pages/LobbyPage.jsx
+@@ -4,6 +4,7 @@ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
+ import Modal from '../components/Modal'
+ import { canShowKick, kickConfirmText } from '../utils/kick'
++import { playerName } from '../utils/profile'
+ 
+ // Games per set offered when creating a Room. Must stay in sync with ALLOWED_MAX_GAMES in backend/src/rooms/roomManager.js.
+ const MAX_GAMES_OPTIONS = [3, 4, 5]
+@@ -47,6 +48,7 @@ export default function LobbyPage() {
+   const myRoom = roomInfo && roomInfo.code === roomCode ? roomInfo : null
+   const isHost = myRoom?.hostId === user?.id
+   const players = myRoom?.players || []
++  const nameOf = (id) => playerName(id, { profiles: myRoom?.profiles, account: id === user?.id ? user : undefined })
+   // Setelah set selesai, semua pemain harus kembali ke Room (Back to Room) sebelum host bisa memulai.
+   const allBack = players.every(p => p.inRoom !== false)
+   const ready = players.length === 4 && allBack
+@@ -195,7 +197,7 @@ export default function LobbyPage() {
+                   <div style={{ display:'flex', alignItems:'center', gap:10 }}>
+                     <div style={s.dot(p?.connected)} />
+                     <span style={{ fontSize:14, color: p ? C.text : C.muted }}>
+-                      {p ? (p.id === user?.id ? `${p.id.slice(0,8)} (kamu)` : p.id.slice(0,8)) : 'Menunggu…'}
++                      {p ? (p.id === user?.id ? `${nameOf(p.id)} (kamu)` : nameOf(p.id)) : 'Menunggu…'}
+                     </span>
+                   </div>
+                   <span style={{ display:'flex', gap:8, alignItems:'center' }}>
+@@ -254,7 +256,7 @@ export default function LobbyPage() {
+               } },
+           ]}
+         >
+-          {kickConfirmText(kickTarget.slice(0, 8), players.find(p => p.id === kickTarget)?.inRoom === false)}
++          {kickConfirmText(nameOf(kickTarget), players.find(p => p.id === kickTarget)?.inRoom === false)}
+         </Modal>
+       )}
+ 
+diff --git a/frontend/src/pages/ResultPage.jsx b/frontend/src/pages/ResultPage.jsx
+index 8d9dfe2..3fd339a 100644
+--- a/frontend/src/pages/ResultPage.jsx
++++ b/frontend/src/pages/ResultPage.jsx
+@@ -3,6 +3,7 @@ import { useGameStore } from '../store/gameStore'
+ import { emitSocket } from '../hooks/useSocket'
+ import Modal from '../components/Modal'
+ import { canShowKick, kickConfirmText, backToRoomDecision, RESTRICTED_MODAL } from '../utils/kick'
++import { playerName } from '../utils/profile'
+ 
+ const C = { bg:'#1a1a2e', surface:'#16213e', accent:'#e94560', text:'#eee', muted:'#888', gold:'#f1c40f', silver:'#bdc3c7', bronze:'#e67e22', green:'#2ecc71', red:'#e74c3c' }
+ const MEDAL = ['🥇','🥈','🥉','💀']
+@@ -24,6 +25,9 @@ export default function ResultPage() {
+   const setScores = setResult?.setScores || {}
+   // Riwayat dibekukan di setResult (tidak ikut berubah saat room di-reset pemain lain).
+   const history = setResult?.gameHistory ?? roomInfo?.gameHistory ?? []
++  // Names: the ones frozen with the result first (still right after someone left or was kicked), then the live Room state.
++  const profiles = { ...roomInfo?.profiles, ...setResult?.profiles }
++  const nameOf = (id) => playerName(id, { profiles, account: id === user?.id ? user : undefined })
+ 
+   // Dua aksi berbeda: Back to Room → return_to_room (tetap anggota, room direset),
+   // Back to Menu Utama → leave_room (keluar dari room sepenuhnya).
+@@ -96,7 +100,7 @@ export default function ResultPage() {
+                 <div style={{ fontSize:24, width:40, textAlign:'center' }}>{MEDAL[i]}</div>
+                 <div style={{ flex:1, marginLeft:10 }}>
+                   <div style={{ fontSize:15, fontWeight:600, color: isMe ? C.gold : C.text }}>
+-                    {isMe ? `${r.id.slice(0,8)} (Kamu)` : r.id.slice(0,8)}
++                    {isMe ? `${nameOf(r.id)} (Kamu)` : nameOf(r.id)}
+                   </div>
+                   <div style={{ fontSize:12, color:C.muted, marginTop:2 }}>Total skor: {r.totalScore} poin</div>
+                 </div>
+@@ -122,7 +126,7 @@ export default function ResultPage() {
+             {history.map((g, i) => (
+               <div key={i} style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:C.muted, paddingBlock:4, borderBottom:i < history.length-1 ? `1px solid #1a4a7a` : 'none' }}>
+                 <span>Game {g.gameNumber}</span>
+-                <span>Menang: <b style={{ color:C.text }}>{g.winnerId?.slice(0,6)}</b></span>
++                <span>Menang: <b style={{ color:C.text }}>{nameOf(g.winnerId)}</b></span>
+                 <span>{g.scores.find(s => s.id === user?.id)?.score ?? '?'} poin</span>
+               </div>
+             ))}
+@@ -166,7 +170,7 @@ export default function ResultPage() {
+             { label: 'Kick', onClick: confirmKick, primary: true },
+           ]}
+         >
+-          {kickConfirmText((kickTarget || '').slice(0, 8), kickPlayerInfo ? kickPlayerInfo.inRoom === false : true)}
++          {kickConfirmText(nameOf(kickTarget || ''), kickPlayerInfo ? kickPlayerInfo.inRoom === false : true)}
+         </Modal>
+       )}
+ 
+diff --git a/frontend/src/utils/gameToast.js b/frontend/src/utils/gameToast.js
+new file mode 100644
+index 0000000..4188b8e
+--- /dev/null
++++ b/frontend/src/utils/gameToast.js
+@@ -0,0 +1,17 @@
++/**
++ * Short toast text for a game event shown during a Game. Pure function so it can be tested without React.
++ * @param {{type: string, winnerId?: string, playerId?: string}} ev  event pushed by useSocket
++ * @param {string} myId   the logged-in player's id
++ * @param {(id: string) => string} nameOf  display name for another player (see playerName in utils/profile.js)
++ * @returns {string|null} null when the event has no toast
++ */
++export function toastMsg(ev, myId, nameOf) {
++  switch (ev.type) {
++    case 'rally_ended':         return '🧹 Rally selesai — meja bersih'
++    case 'game_over':           return ev.winnerId === myId ? '🎉 Kamu menang game ini!' : `🏆 ${nameOf(ev.winnerId)} menang`
++    case 'auto_skipped':        return ev.playerId === myId ? '⏰ Waktu habis — auto skip' : `⏰ Auto skip (${nameOf(ev.playerId)})`
++    case 'player_disconnected': return `📡 ${nameOf(ev.playerId)} terputus`
++    case 'player_reconnected':  return `✅ ${nameOf(ev.playerId)} kembali`
++    default: return null
++  }
++}
+diff --git a/frontend/src/utils/profile.js b/frontend/src/utils/profile.js
+index b6fb284..9f9a7e8 100644
+--- a/frontend/src/utils/profile.js
++++ b/frontend/src/utils/profile.js
+@@ -7,12 +7,35 @@ const hash = (s) => { let h = 2166136261; for (const ch of String(s)) { h ^= ch.
+ 
+ const TINTS = ['#6aa7e8', '#7bd88f', '#f2a65a', '#c58af0', '#ef7b7b', '#5ad1d1']
+ 
+-/** @param {string} id  @param {{username?:string}} [account]  akun login (hanya diketahui untuk pemain utama) */
+-export function getProfile(id, account) {
++/** Every place that must show a player whose name is unknown uses this same short id. */
++export const SHORT_ID_LENGTH = 8
++export const shortId = (id) => String(id ?? '').slice(0, SHORT_ID_LENGTH)
++
++/**
++ * Real name of a player, from the most trustworthy source available:
++ *   1. the server's public profile (`profiles[id].username`, sent with every Room state and frozen into the set result)
++ *   2. the logged-in account (only known for yourself)
++ *   3. the short id (player not in any profile map)
++ * @param {string} id
++ * @param {{profiles?: Object<string, {username?: string}>, account?: {username?: string}}} [sources]
++ */
++export function playerName(id, { profiles, account } = {}) {
++  const fromServer = profiles?.[id]?.username
++  if (typeof fromServer === 'string' && fromServer) return fromServer
++  if (typeof account?.username === 'string' && account.username) return account.username
++  return shortId(id)
++}
++
++/**
++ * @param {string} id
++ * @param {{username?:string}} [account]  akun login (hanya diketahui untuk pemain utama)
++ * @param {Object<string, {username?: string}>} [profiles]  profil publik dari server (roomInfo.profiles / setResult.profiles)
++ */
++export function getProfile(id, account, profiles) {
+   const h = hash(id)
+   return {
+     id,
+-    name: account?.username || String(id).slice(0, 8),   // lawan: id singkat (username lawan belum dikirim server)
++    name: playerName(id, { profiles, account }),
+     level: 1 + (h % 40),                                  // placeholder
+     coins: 20_000 + (h % 9_000) * 1_000,                  // placeholder (bukan saldo nyata)
+     tint: TINTS[h % TINTS.length],
+diff --git a/frontend/tests/combo-ui/render.mjs b/frontend/tests/combo-ui/render.mjs
+index fd12110..51c0cb0 100644
+--- a/frontend/tests/combo-ui/render.mjs
++++ b/frontend/tests/combo-ui/render.mjs
+@@ -65,7 +65,7 @@ const fix = (prefix) => (spec) => ({
+   '../components/GameSyncWaiting': `${prefix}stubs/waiting.mjs`,
+ }[spec] ?? (spec.startsWith('.') ? spec + '.mjs' : spec))
+ build('store/gameStore.js', 'store/gameStore.mjs', fix('../'))
+-for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session', 'gameLayout', 'profile']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
++for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session', 'gameLayout', 'profile', 'gameToast']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
+ build('components/game/ui.jsx', 'components/game/ui.mjs', fix('../../'))
+ build('pages/GamePage.jsx', 'pages/GamePage.mjs', fix('../'))
+ const { useGameStore: store } = await import(pathToFileURL(path.join(OUT, 'store/gameStore.mjs')).href)
+@@ -76,13 +76,13 @@ let pass = 0, fail = 0
+ const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
+ const mk = (id) => ({ id, rank: id.slice(0, -1), suit: id.slice(-1) })
+ const HAND = ['3D','3C','4H','5D','6C','9S','JS','2D']
+-function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND, opp = [{ id: 'p2', cardCount: 13 }], players, bet, turn, scores = {}, offline = [] } = {}) {
++function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND, opp = [{ id: 'p2', cardCount: 13 }], players, bet, turn, scores = {}, offline = [], profiles } = {}) {
+   setWidth(width)
+   const me = 'me'
+   const current = turn ?? (myTurn ? me : 'p2')
+   store.setState({
+     user: { id: me, username: 'Syamil_Jumaries' }, roomCode: 'ROOM', connected,
+-    roomInfo: { code: 'ROOM', maxGames: 4, setScores: scores, ...(bet !== undefined ? { bet } : {}),
++    roomInfo: { code: 'ROOM', maxGames: 4, setScores: scores, ...(bet !== undefined ? { bet } : {}), ...(profiles ? { profiles } : {}),
+                 players: players || [me, ...opp.map(o => o.id)].map(id => ({ id, connected: !offline.includes(id), inRoom: true })) },
+     selectedIds: selected, events: [], currentTurn: current,
+     gameState: { gameNumber: 1, myHand: hand.map(mk), opponents: opp, currentTurn: current, timeLeft: 30000, table },
+@@ -217,4 +217,19 @@ t('Game: banner error tidak menangkap sentuhan (pointer-events: none) dan tidak
+   assert.match(tag, /pointer-events:\s*none/); assert.match(tag, /position:\s*fixed/)
+ })
+ 
++// ── Player names in Game ──
++const P3 = { me: { username: 'Syamil_Jumaries' }, aaaa1111: { username: 'Sari_Dewi' }, bbbb2222: { username: 'Andi' }, cccc3333: { username: 'Dewi' }, p2: { username: 'Sari_Dewi' } }
++t('Game: kursi lawan menampilkan nama asli dari profiles; ID tidak tampil', () => {
++  const html = render({ opp: OPP3, profiles: P3 }).html
++  for (const n of ['Sari_Dewi', 'Andi', 'Dewi']) assert.ok(html.includes(n), `${n} tidak tampil`)
++  for (const o of OPP3) assert.ok(!html.includes(o.id), `${o.id} tidak boleh tampil`)
++})
++t('Game: status "Menunggu ..." memakai nama pemain yang gilirannya', () => {
++  assert.ok(render({ myTurn: false, turn: 'p2', profiles: P3 }).html.includes('Menunggu Sari_Dewi'))
++})
++t('Game: tanpa profiles tetap jalan: lawan tampil dengan ID singkat 8 karakter (perilaku lama)', () => {
++  const html = render({ opp: OPP3 }).html
++  for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
++})
++
+ console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/kick-ui/render.mjs b/frontend/tests/kick-ui/render.mjs
+index a7b28bb..3a504fa 100644
+--- a/frontend/tests/kick-ui/render.mjs
++++ b/frontend/tests/kick-ui/render.mjs
+@@ -59,7 +59,7 @@ const build = (rel, dest) => {
+   code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
+   fs.writeFileSync(path.join(OUT, dest), code)
+ }
+-for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
++for (const f of ['store/gameStore.js', 'utils/kick.js', 'utils/profile.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+ const url = (f) => pathToFileURL(path.join(OUT, f)).href
+ const { useGameStore: store } = await import(url('store/gameStore.mjs'))
+ const ResultPage = (await import(url('pages/ResultPage.mjs'))).default
+@@ -170,4 +170,28 @@ t('Lobby: pemain di-Kick dari Result yang tersasar ke Lobby tidak menggambar Roo
+   const html = renderToString(React.createElement(LobbyPage))
+   assert.equal(html, '')
+ })
++// ── Player names on Result ──
++const NAMES = { [IDS[0]]: { username: 'Budi' }, [IDS[1]]: { username: 'Sari_Dewi' }, [IDS[2]]: { username: 'Andi' }, [IDS[3]]: { username: 'Dewi' } }
++const renderResultNamed = ({ frozen = NAMES, live, members = IDS } = {}) => {
++  state({ members })
++  store.setState({ user: { id: IDS[0], username: 'Budi' }, setResult: { ...result, ...(frozen ? { profiles: frozen } : {}) },
++                   roomInfo: { ...store.getState().roomInfo, ...(live ? { profiles: live } : {}) } })
++  return renderToString(React.createElement(ResultPage)).replace(/<!-- -->/g, '')
++}
++t('Result: peringkat dan riwayat menampilkan nama asli; diri sendiri "(Kamu)"; ID tidak tampil', () => {
++  const html = renderResultNamed()
++  assert.ok(html.includes('Budi (Kamu)')); assert.ok(html.includes('>Sari_Dewi<')); assert.ok(html.includes('>Andi<')); assert.ok(html.includes('>Dewi<'))
++  assert.ok(count(html, /Menang: <b[^>]*>(Budi|Sari_Dewi|Andi|Dewi)<\/b>/g) >= 6, 'riwayat game harus memuat nama pemenang')
++  for (const id of IDS) assert.ok(!html.includes(id.slice(0, 8)), `${id.slice(0, 8)} tidak boleh tampil`)
++})
++t('Result: pemain yang sudah keluar dari Room tetap tampil dengan namanya (nama dibekukan di hasil set)', () => {
++  const html = renderResultNamed({ members: [IDS[0], IDS[1]], live: { [IDS[0]]: { username: 'Budi' }, [IDS[1]]: { username: 'Sari_Dewi' } } })
++  assert.ok(html.includes('>Andi<') && html.includes('>Dewi<'), 'pemain yang keluar harus tetap bernama')
++})
++t('Result: nama yang dibekukan di hasil set menang atas peta live; tanpa keduanya → ID singkat', () => {
++  const html = renderResultNamed({ frozen: { [IDS[1]]: { username: 'NamaBeku' } }, live: { [IDS[1]]: { username: 'NamaLive' }, [IDS[2]]: { username: 'Andi' } } })
++  assert.ok(html.includes('>NamaBeku<')); assert.ok(!html.includes('NamaLive')); assert.ok(html.includes('>Andi<'))
++  assert.ok(html.includes(`>${IDS[3].slice(0, 8)}<`), 'pemain tanpa profil → ID singkat 8 karakter')
++})
++
+ console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/lobby-ui/render.mjs b/frontend/tests/lobby-ui/render.mjs
+index 71fa606..104f336 100644
+--- a/frontend/tests/lobby-ui/render.mjs
++++ b/frontend/tests/lobby-ui/render.mjs
+@@ -60,7 +60,7 @@ const build = (rel, dest) => {
+   code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
+   fs.writeFileSync(path.join(OUT, dest), code)
+ }
+-for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
++for (const f of ['store/gameStore.js', 'utils/kick.js', 'utils/profile.js', 'components/Modal.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+ const url = (f) => pathToFileURL(path.join(OUT, f)).href
+ const { useGameStore: store } = await import(url('store/gameStore.mjs'))
+ const LobbyPage = (await import(url('pages/LobbyPage.mjs'))).default
+@@ -129,4 +129,25 @@ t('Room: error server (mis. Mulai Game gagal) juga ditampilkan', () => {
+   assert.ok(!renderRoom(4).includes('role="alert"'))
+ })
+ 
++// ── Player names ──
++const roomWithNames = ({ profiles, user = { id: ME, username: 'Budi' } }) => {
++  const players = [ME, 'p200000000', 'p300000000'].map(id => ({ id, connected: true, inRoom: true }))
++  store.setState({ ...base, user, roomCode: 'ABC123', roomInfo: { code: 'ABC123', hostId: ME, status: 'waiting', maxGames: 4, players, gameHistory: [], ...(profiles ? { profiles } : {}) } })
++  return renderToString(React.createElement(LobbyPage)).replace(/<!-- -->/g, '')
++}
++t('Room: kursi menampilkan nama asli pemain (dan "(kamu)" untuk diri sendiri), bukan ID', () => {
++  const html = roomWithNames({ profiles: { [ME]: { username: 'Budi' }, p200000000: { username: 'Sari_Dewi' }, p300000000: { username: 'Andi' } } })
++  assert.ok(html.includes('Budi (kamu)')); assert.ok(html.includes('>Sari_Dewi<')); assert.ok(html.includes('>Andi<'))
++  for (const id of ['me000000', 'p2000000', 'p3000000']) assert.ok(!html.includes(id), `${id} tidak boleh tampil`)
++})
++t('Room: pemain tanpa profil tampil dengan ID singkat 8 karakter; diri sendiri memakai username akun', () => {
++  const html = roomWithNames({ profiles: { p200000000: { username: 'Sari_Dewi' } } })
++  assert.ok(html.includes('Budi (kamu)'), 'username akun dipakai bila profil diri sendiri belum ada')
++  assert.ok(html.includes('>Sari_Dewi<')); assert.ok(html.includes('>p3000000<'))
++})
++t('Room: tanpa peta profiles sama sekali (server lama) tetap jalan dengan ID singkat', () => {
++  const html = roomWithNames({})
++  assert.ok(html.includes('>p2000000<')); assert.ok(html.includes('>p3000000<'))
++})
++
+ console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/player-names/run.mjs b/frontend/tests/player-names/run.mjs
+new file mode 100644
+index 0000000..fb51c65
+--- /dev/null
++++ b/frontend/tests/player-names/run.mjs
+@@ -0,0 +1,103 @@
++// Player names in the UI. Runs standalone with plain Node (no bash, no env vars):
++//   node tests/player-names/run.mjs        or        npm run test:names     (from the frontend folder)
++import assert from 'node:assert/strict'
++import fs from 'node:fs'
++import path from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { playerName, shortId, SHORT_ID_LENGTH, getProfile } from '../../src/utils/profile.js'
++import { toastMsg } from '../../src/utils/gameToast.js'
++
++const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '../../src')
++let pass = 0, fail = 0
++const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
++
++const ID = 'a1b2c3d4-0000-4000-8000-123456789abc'
++const profiles = { [ID]: { username: 'Sari_Dewi' }, other: { username: 'Budi' } }
++
++t('shortId: satu panjang untuk seluruh UI (8), id pendek tetap utuh, null/undefined aman', () => {
++  assert.equal(SHORT_ID_LENGTH, 8)
++  assert.equal(shortId(ID), 'a1b2c3d4'); assert.equal(shortId('ab'), 'ab')
++  assert.equal(shortId(undefined), ''); assert.equal(shortId(null), '')
++})
++
++t('playerName: nama dari profil server menang atas akun dan atas id', () => {
++  assert.equal(playerName(ID, { profiles }), 'Sari_Dewi')
++  assert.equal(playerName(ID, { profiles, account: { username: 'Lain' } }), 'Sari_Dewi')
++})
++
++t('playerName: tanpa profil dipakai username akun, lalu id singkat', () => {
++  assert.equal(playerName(ID, { account: { username: 'Syamil' } }), 'Syamil')
++  assert.equal(playerName(ID), 'a1b2c3d4')
++  assert.equal(playerName(ID, { profiles: {} }), 'a1b2c3d4')
++  assert.equal(playerName(ID, {}), 'a1b2c3d4')
++})
++
++t('playerName: username kosong / bukan string diabaikan, jatuh ke sumber berikutnya', () => {
++  for (const bad of ['', null, undefined, 42, {}, []]) {
++    assert.equal(playerName(ID, { profiles: { [ID]: { username: bad } }, account: { username: 'Akun' } }), 'Akun', JSON.stringify(bad))
++    assert.equal(playerName(ID, { profiles: { [ID]: { username: bad } } }), 'a1b2c3d4', JSON.stringify(bad))
++  }
++  assert.equal(playerName(ID, { profiles: { [ID]: null } }), 'a1b2c3d4')
++})
++
++t('playerName: id yang menyerupai properti bawaan Object tidak mengacaukan hasil', () => {
++  for (const id of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) assert.equal(playerName(id, { profiles: {} }), shortId(id))
++})
++
++t('playerName: nama dicari menurut ID, bukan menurut nama (dua pemain bernama sama tetap berbeda ID)', () => {
++  const twins = { id1: { username: 'Kembar' }, id2: { username: 'Kembar' } }
++  assert.equal(playerName('id1', { profiles: twins }), 'Kembar'); assert.equal(playerName('id2', { profiles: twins }), 'Kembar')
++  assert.equal(playerName('Kembar', { profiles: twins }), 'Kembar'.slice(0, 8))   // "Kembar" sebagai id tidak ditemukan → id singkat
++})
++
++t('getProfile: nama mengikuti playerName; perilaku 2 argumen lama tetap; level/koin/warna tidak bergantung pada nama', () => {
++  assert.equal(getProfile('abc12345xyz').name, 'abc12345')
++  assert.equal(getProfile('abc12345xyz', { username: 'Syamil' }).name, 'Syamil')
++  assert.equal(getProfile(ID, undefined, profiles).name, 'Sari_Dewi')
++  const a = getProfile(ID, undefined, profiles), b = getProfile(ID)
++  assert.deepEqual({ ...a, name: '' }, { ...b, name: '' })
++})
++
++t('toastMsg: memakai nama pemain, bukan potongan id; "kamu" tetap untuk diri sendiri', () => {
++  const nameOf = (id) => playerName(id, { profiles })
++  assert.equal(toastMsg({ type: 'game_over', winnerId: ID }, 'me', nameOf), '🏆 Sari_Dewi menang')
++  assert.equal(toastMsg({ type: 'game_over', winnerId: 'me' }, 'me', nameOf), '🎉 Kamu menang game ini!')
++  assert.equal(toastMsg({ type: 'auto_skipped', playerId: ID }, 'me', nameOf), '⏰ Auto skip (Sari_Dewi)')
++  assert.equal(toastMsg({ type: 'auto_skipped', playerId: 'me' }, 'me', nameOf), '⏰ Waktu habis — auto skip')
++  assert.equal(toastMsg({ type: 'player_disconnected', playerId: ID }, 'me', nameOf), '📡 Sari_Dewi terputus')
++  assert.equal(toastMsg({ type: 'player_reconnected', playerId: ID }, 'me', nameOf), '✅ Sari_Dewi kembali')
++})
++
++t('toastMsg: pemain tanpa profil → id singkat 8 karakter (bukan 6)', () => {
++  const nameOf = (id) => playerName(id, {})
++  assert.equal(toastMsg({ type: 'player_disconnected', playerId: ID }, 'me', nameOf), '📡 a1b2c3d4 terputus')
++  assert.equal(toastMsg({ type: 'game_over', winnerId: ID }, 'me', nameOf), '🏆 a1b2c3d4 menang')
++})
++
++t('toastMsg: rally_ended punya pesan; event lain tidak punya toast', () => {
++  assert.match(toastMsg({ type: 'rally_ended' }, 'me', () => ''), /Rally selesai/)
++  for (const type of ['cards_played', 'player_skipped', 'turn_changed', 'set_over', 'xyz']) assert.equal(toastMsg({ type }, 'me', () => ''), null, type)
++})
++
++// Guard against regressions: nobody may cut an id by hand again; every page must go through playerName.
++const readSrc = (rel) => fs.readFileSync(path.join(SRC, rel), 'utf8')
++const stripComments = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
++const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)])
++
++t('tidak ada pemotongan id manual di src (hanya profile.js yang boleh memotong id)', () => {
++  const offenders = []
++  for (const f of walk(SRC).filter(f => /\.(jsx?|mjs)$/.test(f))) {
++    if (f.endsWith(path.join('utils', 'profile.js'))) continue
++    const code = stripComments(fs.readFileSync(f, 'utf8'))
++    if (/\b\w*[iI]d\??\.slice\(\s*0\s*,\s*\d+\s*\)/.test(code) || /\)\.slice\(\s*0\s*,\s*\d+\s*\)/.test(code)) offenders.push(path.relative(SRC, f))
++  }
++  assert.deepEqual(offenders, [], `memotong id secara manual: ${offenders.join(', ')}`)
++})
++
++t('Lobby, Game, dan Result memakai playerName; GamePage tidak punya salinan toastMsg sendiri', () => {
++  for (const f of ['pages/LobbyPage.jsx', 'pages/GamePage.jsx', 'pages/ResultPage.jsx']) assert.match(readSrc(f), /playerName\(/, `${f} tidak memakai playerName`)
++  assert.doesNotMatch(readSrc('pages/GamePage.jsx'), /function toastMsg/)
++  assert.match(readSrc('pages/GamePage.jsx'), /from '..\/utils\/gameToast'/)
++})
++
++console.log(`\n${pass}/${pass + fail} lulus`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/player-names/run.sh b/frontend/tests/player-names/run.sh
+new file mode 100644
+index 0000000..6a41be4
+--- /dev/null
++++ b/frontend/tests/player-names/run.sh
+@@ -0,0 +1,4 @@
++#!/usr/bin/env bash
++# Thin wrapper (works the same without bash: `node tests/player-names/run.mjs`).
++set -euo pipefail
++exec node "$(cd "$(dirname "$0")" && pwd)/run.mjs"
+diff --git a/frontend/tests/sync.sim/run.mjs b/frontend/tests/sync.sim/run.mjs
+index 6e4fd9f..1273284 100644
+--- a/frontend/tests/sync.sim/run.mjs
++++ b/frontend/tests/sync.sim/run.mjs
+@@ -260,6 +260,14 @@ t('leave_room_error dan return_room_error: prefix lama + alasan yang ramah', ()
+   assert.equal(st().error, 'Gagal kembali ke room: Kamu tidak berada di room ini.')
+   st().clearError()
+ })
++t('profiles dari server masuk ke store: room_updated → roomInfo, set_over → setResult', () => {
++  const profiles = { u1: { username: 'Budi' }, u2: { username: 'Sari' } }
++  s2.fire('room_updated', { code: 'ROOM1', hostId: 'u1', status: 'waiting', maxGames: 4, players: [{ id: 'u1', connected: true, inRoom: true }], profiles, setScores: {}, gameHistory: [], game: null })
++  assert.deepEqual(st().roomInfo.profiles, profiles)
++  const result = { rankings: [{ id: 'u1', totalScore: 1 }], setScores: {}, gameHistory: [], profiles }
++  s2.fire('set_over', result)
++  assert.deepEqual(st().setResult.profiles, profiles)
++})
+ t('logout membersihkan pembatasan; listener Kick tidak ganda', () => {
+   st().setRestricted(true); st().openRestrictedModal(); st().logout()
+   assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false)

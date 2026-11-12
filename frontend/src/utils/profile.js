@@ -7,12 +7,35 @@ const hash = (s) => { let h = 2166136261; for (const ch of String(s)) { h ^= ch.
 
 const TINTS = ['#6aa7e8', '#7bd88f', '#f2a65a', '#c58af0', '#ef7b7b', '#5ad1d1']
 
-/** @param {string} id  @param {{username?:string}} [account]  akun login (hanya diketahui untuk pemain utama) */
-export function getProfile(id, account) {
+/** Every place that must show a player whose name is unknown uses this same short id. */
+export const SHORT_ID_LENGTH = 8
+export const shortId = (id) => String(id ?? '').slice(0, SHORT_ID_LENGTH)
+
+/**
+ * Real name of a player, from the most trustworthy source available:
+ *   1. the server's public profile (`profiles[id].username`, sent with every Room state and frozen into the set result)
+ *   2. the logged-in account (only known for yourself)
+ *   3. the short id (player not in any profile map)
+ * @param {string} id
+ * @param {{profiles?: Object<string, {username?: string}>, account?: {username?: string}}} [sources]
+ */
+export function playerName(id, { profiles, account } = {}) {
+  const fromServer = profiles?.[id]?.username
+  if (typeof fromServer === 'string' && fromServer) return fromServer
+  if (typeof account?.username === 'string' && account.username) return account.username
+  return shortId(id)
+}
+
+/**
+ * @param {string} id
+ * @param {{username?:string}} [account]  akun login (hanya diketahui untuk pemain utama)
+ * @param {Object<string, {username?: string}>} [profiles]  profil publik dari server (roomInfo.profiles / setResult.profiles)
+ */
+export function getProfile(id, account, profiles) {
   const h = hash(id)
   return {
     id,
-    name: account?.username || String(id).slice(0, 8),   // lawan: id singkat (username lawan belum dikirim server)
+    name: playerName(id, { profiles, account }),
     level: 1 + (h % 40),                                  // placeholder
     coins: 20_000 + (h % 9_000) * 1_000,                  // placeholder (bukan saldo nyata)
     tint: TINTS[h % TINTS.length],

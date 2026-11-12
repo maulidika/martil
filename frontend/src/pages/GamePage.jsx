@@ -8,7 +8,8 @@ import { COMBO_TYPES, listAvailableCombos, activePickOf } from '../utils/comboPi
 import { mainDeckIds, isGroupSelected, anchorAbove, canGroupSelection } from '../utils/groupChain'
 import { INITIAL_UI, syncUi, reduceHandUi } from '../utils/handUi'
 import { computeLayout, seatSides, orderOpponents, turnRingPct } from '../utils/gameLayout'
-import { getProfile, betLabel } from '../utils/profile'
+import { getProfile, playerName, betLabel } from '../utils/profile'
+import { toastMsg } from '../utils/gameToast'
 import {
   T, TableSurface, PlayerSeat, MyBadge, PlayingCard, DetectorPills, ClearButton, PlayButton, RoundButton, BetBadge, InfoPanel,
 } from '../components/game/ui'
@@ -22,6 +23,8 @@ export default function GamePage() {
           setSelection, clearSelection, events, roomInfo, connected, setError, error, clearError } = useGameStore()
 
   const currentRoomCode = roomCode || roomInfo?.code
+  // Display name of another player (real username from the server profiles; 'kamu' for yourself).
+  const nameOf = (id) => id === user?.id ? 'kamu' : playerName(id, { profiles: roomInfo?.profiles })
   const myTurn   = currentTurn === user?.id
   const myHand   = gameState?.myHand ? sortHand(gameState.myHand) : []
   const handIds  = myHand.map(c => c.id)
@@ -100,7 +103,7 @@ export default function GamePage() {
   useEffect(() => {
     const latest = events[0]
     if (!latest) return
-    const msg = toastMsg(latest, user?.id)
+    const msg = toastMsg(latest, user?.id, nameOf)
     if (!msg) return
     setToast(msg)
     clearTimeout(toastRef.current)
@@ -146,10 +149,9 @@ export default function GamePage() {
   const opponents = orderOpponents(gameState.opponents || [], (roomInfo?.players || []).map(p => p.id), user?.id)
   const sides     = seatSides(opponents.length)
   const ringPct   = turnRingPct(timeLeft)
-  const me        = getProfile(user?.id, user)
+  const me        = getProfile(user?.id, user, roomInfo?.profiles)
   const font      = L.seatFont
   const bet       = betLabel(roomInfo)
-  const nameOf    = (id) => id === user?.id ? 'kamu' : getProfile(id).name
   const detectorTypes = COMBO_TYPES.filter(t => available[t.key]?.length)
   const onPick    = (kind) => act({ type: 'detector', available, kind })
   const topSeatH  = L.seatH                                    // tinggi kursi atas; area meja berada di bawahnya
@@ -206,7 +208,7 @@ export default function GamePage() {
         <div style={{ position:'absolute', right:12, top:10 }}>{autoBtn}</div>
 
         {opponents.map((op, i) => {
-          const profile = getProfile(op.id)
+          const profile = getProfile(op.id, undefined, roomInfo?.profiles)
           const side = sides[i]
           return (
             <div key={op.id} style={compact
@@ -380,13 +382,3 @@ function useViewport() {
   return vp
 }
 
-function toastMsg(ev, myId) {
-  switch (ev.type) {
-    case 'rally_ended':       return '🧹 Rally selesai — meja bersih'
-    case 'game_over':         return ev.winnerId === myId ? '🎉 Kamu menang game ini!' : `🏆 ${ev.winnerId?.slice(0,6)} menang`
-    case 'auto_skipped':      return ev.playerId === myId ? '⏰ Waktu habis — auto skip' : `⏰ Auto skip (${ev.playerId?.slice(0,6)})`
-    case 'player_disconnected': return `📡 ${ev.playerId?.slice(0,6)} terputus`
-    case 'player_reconnected':  return `✅ ${ev.playerId?.slice(0,6)} kembali`
-    default: return null
-  }
-}

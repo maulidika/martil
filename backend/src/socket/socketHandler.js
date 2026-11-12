@@ -54,7 +54,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       const payload = readPayload(data, [], { allowEmpty: true });
       if (!payload) return emitRejection(socket, 'create_room', 'INVALID_PAYLOAD');
       const { maxGames = rm.DEFAULT_MAX_GAMES } = payload;   // validated by rm.createRoom (INVALID_MAX_GAMES)
-      const result = rm.createRoom(userId, maxGames);
+      const result = rm.createRoom(userId, maxGames, socket.user.username);
       if (!result.ok) return socket.emit('error', { code: result.error });
 
       rm.bindSocket(result.room.code, userId, socket.id);
@@ -77,7 +77,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       }
 
       // Fresh join
-      const result = rm.joinRoom(roomCode, userId);
+      const result = rm.joinRoom(roomCode, userId, socket.user.username);
       if (!result.ok) return socket.emit('error', { code: result.error });
 
       if (result.reset) debugLog('ROOM_RESET_FOR_NEW_SET', { roomCode, trigger: 'join_room', userId });
@@ -417,6 +417,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
         rankings:    event.rankings,
         setScores:   event.setScores,
         gameHistory: event.gameHistory,
+        profiles:    event.profiles,
       });
     } else {
       setTimeout(() => {

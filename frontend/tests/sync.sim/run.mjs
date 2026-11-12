@@ -260,6 +260,14 @@ t('leave_room_error dan return_room_error: prefix lama + alasan yang ramah', () 
   assert.equal(st().error, 'Gagal kembali ke room: Kamu tidak berada di room ini.')
   st().clearError()
 })
+t('profiles dari server masuk ke store: room_updated → roomInfo, set_over → setResult', () => {
+  const profiles = { u1: { username: 'Budi' }, u2: { username: 'Sari' } }
+  s2.fire('room_updated', { code: 'ROOM1', hostId: 'u1', status: 'waiting', maxGames: 4, players: [{ id: 'u1', connected: true, inRoom: true }], profiles, setScores: {}, gameHistory: [], game: null })
+  assert.deepEqual(st().roomInfo.profiles, profiles)
+  const result = { rankings: [{ id: 'u1', totalScore: 1 }], setScores: {}, gameHistory: [], profiles }
+  s2.fire('set_over', result)
+  assert.deepEqual(st().setResult.profiles, profiles)
+})
 t('logout membersihkan pembatasan; listener Kick tidak ganda', () => {
   st().setRestricted(true); st().openRestrictedModal(); st().logout()
   assert.equal(st().restricted, false); assert.equal(st().restrictedModalOpen, false)

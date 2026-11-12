@@ -65,7 +65,7 @@ const fix = (prefix) => (spec) => ({
   '../components/GameSyncWaiting': `${prefix}stubs/waiting.mjs`,
 }[spec] ?? (spec.startsWith('.') ? spec + '.mjs' : spec))
 build('store/gameStore.js', 'store/gameStore.mjs', fix('../'))
-for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session', 'gameLayout', 'profile']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
+for (const f of ['comboDetector', 'comboPicker', 'groupChain', 'handUi', 'session', 'gameLayout', 'profile', 'gameToast']) build(`utils/${f}.js`, `utils/${f}.mjs`, fix('../'))
 build('components/game/ui.jsx', 'components/game/ui.mjs', fix('../../'))
 build('pages/GamePage.jsx', 'pages/GamePage.mjs', fix('../'))
 const { useGameStore: store } = await import(pathToFileURL(path.join(OUT, 'store/gameStore.mjs')).href)
@@ -76,13 +76,13 @@ let pass = 0, fail = 0
 const t = (name, fn) => { try { fn(); pass++; console.log('  PASS ', name) } catch (e) { fail++; console.log('  FAIL ', name, '\n        ', e.message) } }
 const mk = (id) => ({ id, rank: id.slice(0, -1), suit: id.slice(-1) })
 const HAND = ['3D','3C','4H','5D','6C','9S','JS','2D']
-function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND, opp = [{ id: 'p2', cardCount: 13 }], players, bet, turn, scores = {}, offline = [] } = {}) {
+function render({ width = 1000, myTurn = true, selected = [], table = [], connected = true, hand = HAND, opp = [{ id: 'p2', cardCount: 13 }], players, bet, turn, scores = {}, offline = [], profiles } = {}) {
   setWidth(width)
   const me = 'me'
   const current = turn ?? (myTurn ? me : 'p2')
   store.setState({
     user: { id: me, username: 'Syamil_Jumaries' }, roomCode: 'ROOM', connected,
-    roomInfo: { code: 'ROOM', maxGames: 4, setScores: scores, ...(bet !== undefined ? { bet } : {}),
+    roomInfo: { code: 'ROOM', maxGames: 4, setScores: scores, ...(bet !== undefined ? { bet } : {}), ...(profiles ? { profiles } : {}),
                 players: players || [me, ...opp.map(o => o.id)].map(id => ({ id, connected: !offline.includes(id), inRoom: true })) },
     selectedIds: selected, events: [], currentTurn: current,
     gameState: { gameNumber: 1, myHand: hand.map(mk), opponents: opp, currentTurn: current, timeLeft: 30000, table },
@@ -215,6 +215,21 @@ t('Game: banner error tidak menangkap sentuhan (pointer-events: none) dan tidak 
   const html = withError('Kartu itu tidak ada di tanganmu.', () => render().html)
   const tag = html.slice(html.indexOf('data-testid="game-error"'), html.indexOf('>', html.indexOf('data-testid="game-error"')))
   assert.match(tag, /pointer-events:\s*none/); assert.match(tag, /position:\s*fixed/)
+})
+
+// ── Player names in Game ──
+const P3 = { me: { username: 'Syamil_Jumaries' }, aaaa1111: { username: 'Sari_Dewi' }, bbbb2222: { username: 'Andi' }, cccc3333: { username: 'Dewi' }, p2: { username: 'Sari_Dewi' } }
+t('Game: kursi lawan menampilkan nama asli dari profiles; ID tidak tampil', () => {
+  const html = render({ opp: OPP3, profiles: P3 }).html
+  for (const n of ['Sari_Dewi', 'Andi', 'Dewi']) assert.ok(html.includes(n), `${n} tidak tampil`)
+  for (const o of OPP3) assert.ok(!html.includes(o.id), `${o.id} tidak boleh tampil`)
+})
+t('Game: status "Menunggu ..." memakai nama pemain yang gilirannya', () => {
+  assert.ok(render({ myTurn: false, turn: 'p2', profiles: P3 }).html.includes('Menunggu Sari_Dewi'))
+})
+t('Game: tanpa profiles tetap jalan: lawan tampil dengan ID singkat 8 karakter (perilaku lama)', () => {
+  const html = render({ opp: OPP3 }).html
+  for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
 })
 
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)

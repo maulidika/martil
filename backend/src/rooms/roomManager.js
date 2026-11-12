@@ -25,6 +25,30 @@ const restrictions = new Map();
 
 // ─── Room creation & joining ─────────────────────────────────────────────────
 
+/** Longest username the registration accepts (see auth/routes.js); anything longer is not a username we issued. */
+const MAX_USERNAME_LENGTH = 30;
+
+/**
+ * Display name for a player entry. `username` comes from the verified login token (never from the client), but is
+ * still validated: a non-string, empty, or over-long value yields no name and the UI falls back to a short id.
+ */
+function _cleanUsername(username) {
+  if (typeof username !== 'string') return undefined;
+  const name = username.trim();
+  return name.length > 0 && name.length <= MAX_USERNAME_LENGTH ? name : undefined;
+}
+
+/**
+ * Public profile data of the players currently in the Room, keyed by the internal player id (which never depends on
+ * the username). WHITELIST: only the fields listed here may ever be sent to other players: no email, token or hash.
+ * @returns {Object<string, {username: string}>}
+ */
+function _profilesOf(room) {
+  const profiles = {};
+  for (const p of room.players) if (p.username) profiles[p.id] = { username: p.username };
+  return profiles;
+}
+
 /**
  * The Room (other than `exceptCode`) this account is currently a member of, or null.
  * Membership = being in `room.players`, whatever the Room status (waiting, playing, done) and whether the
@@ -45,7 +69,7 @@ function roomOfPlayer(userId, exceptCode = null) {
 const ALLOWED_MAX_GAMES = Object.freeze([3, 4, 5]);
 const DEFAULT_MAX_GAMES = 4;
 
-function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES) {
+function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES, username) {
   if (restrictions.has(hostId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
   // Validate before touching any state (a rejected request must not clear a KICKED removal record).
   if (!ALLOWED_MAX_GAMES.includes(maxGames)) return { ok: false, error: 'INVALID_MAX_GAMES' };
@@ -60,7 +84,7 @@ function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES) {
     hostId,
     maxGames,
     status: 'waiting',
-    players: [{ id: hostId, connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() }],
+    players: [{ id: hostId, username: _cleanUsername(username), connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() }],
     setId: null,
     setScores: {},
     currentGame: null,
@@ -81,7 +105,7 @@ function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES) {
   return { ok: true, room };
 }
 
-function joinRoom(code, playerId) {
+function joinRoom(code, playerId, username) {
   if (restrictions.has(playerId))                  return { ok: false, error: 'KICKED_FROM_ROOM' };
   const room = rooms.get(code);
   if (!room)                                       return { ok: false, error: 'ROOM_NOT_FOUND' };
@@ -96,7 +120,7 @@ function joinRoom(code, playerId) {
   const reset = room.status === 'done' ? _resetRoomForNewSet(room) : false;
 
   if (removals.get(playerId)?.reason === 'KICKED') removals.delete(playerId);   // Kick bukan blacklist: boleh bergabung lagi
-  room.players.push({ id: playerId, connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
+  room.players.push({ id: playerId, username: _cleanUsername(username), connected: true, inRoom: true, disconnectedAt: null, socketId: null, joinedAt: Date.now() });
   return { ok: true, room, reset };
 }
 
@@ -236,8 +260,10 @@ function _handleGameOver(room, event) {
       rankings,
       setScores:   { ...room.setScores },
       gameHistory: room.gameHistory.map(g => ({ ...g })),
+      profiles:    _profilesOf(room),   // names frozen with the result: still right after someone leaves or is kicked
     };
     event.gameHistory = room.setResult.gameHistory;
+    event.profiles    = room.setResult.profiles;
     // Semua pemain sekarang berada di Scoreboard, belum kembali ke Room.
     for (const p of room.players) p.inRoom = false;
   } else {
@@ -563,6 +589,7 @@ function publicState(code, forPlayerId) {
     status:      room.status,
     maxGames:    room.maxGames,
     players:     room.players.map(p => ({ id: p.id, connected: p.connected, inRoom: p.inRoom !== false })),
+    profiles:    _profilesOf(room),
     setScores:   room.setScores,
     gameHistory: room.gameHistory,
     game:        room.currentGame

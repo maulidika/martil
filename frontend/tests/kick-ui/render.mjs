@@ -59,7 +59,7 @@ const build = (rel, dest) => {
   code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
   fs.writeFileSync(path.join(OUT, dest), code)
 }
-for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+for (const f of ['store/gameStore.js', 'utils/kick.js', 'utils/profile.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
 const url = (f) => pathToFileURL(path.join(OUT, f)).href
 const { useGameStore: store } = await import(url('store/gameStore.mjs'))
 const ResultPage = (await import(url('pages/ResultPage.mjs'))).default
@@ -170,4 +170,28 @@ t('Lobby: pemain di-Kick dari Result yang tersasar ke Lobby tidak menggambar Roo
   const html = renderToString(React.createElement(LobbyPage))
   assert.equal(html, '')
 })
+// ── Player names on Result ──
+const NAMES = { [IDS[0]]: { username: 'Budi' }, [IDS[1]]: { username: 'Sari_Dewi' }, [IDS[2]]: { username: 'Andi' }, [IDS[3]]: { username: 'Dewi' } }
+const renderResultNamed = ({ frozen = NAMES, live, members = IDS } = {}) => {
+  state({ members })
+  store.setState({ user: { id: IDS[0], username: 'Budi' }, setResult: { ...result, ...(frozen ? { profiles: frozen } : {}) },
+                   roomInfo: { ...store.getState().roomInfo, ...(live ? { profiles: live } : {}) } })
+  return renderToString(React.createElement(ResultPage)).replace(/<!-- -->/g, '')
+}
+t('Result: peringkat dan riwayat menampilkan nama asli; diri sendiri "(Kamu)"; ID tidak tampil', () => {
+  const html = renderResultNamed()
+  assert.ok(html.includes('Budi (Kamu)')); assert.ok(html.includes('>Sari_Dewi<')); assert.ok(html.includes('>Andi<')); assert.ok(html.includes('>Dewi<'))
+  assert.ok(count(html, /Menang: <b[^>]*>(Budi|Sari_Dewi|Andi|Dewi)<\/b>/g) >= 6, 'riwayat game harus memuat nama pemenang')
+  for (const id of IDS) assert.ok(!html.includes(id.slice(0, 8)), `${id.slice(0, 8)} tidak boleh tampil`)
+})
+t('Result: pemain yang sudah keluar dari Room tetap tampil dengan namanya (nama dibekukan di hasil set)', () => {
+  const html = renderResultNamed({ members: [IDS[0], IDS[1]], live: { [IDS[0]]: { username: 'Budi' }, [IDS[1]]: { username: 'Sari_Dewi' } } })
+  assert.ok(html.includes('>Andi<') && html.includes('>Dewi<'), 'pemain yang keluar harus tetap bernama')
+})
+t('Result: nama yang dibekukan di hasil set menang atas peta live; tanpa keduanya → ID singkat', () => {
+  const html = renderResultNamed({ frozen: { [IDS[1]]: { username: 'NamaBeku' } }, live: { [IDS[1]]: { username: 'NamaLive' }, [IDS[2]]: { username: 'Andi' } } })
+  assert.ok(html.includes('>NamaBeku<')); assert.ok(!html.includes('NamaLive')); assert.ok(html.includes('>Andi<'))
+  assert.ok(html.includes(`>${IDS[3].slice(0, 8)}<`), 'pemain tanpa profil → ID singkat 8 karakter')
+})
+
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)

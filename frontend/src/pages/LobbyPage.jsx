@@ -4,6 +4,7 @@ import { useGameStore } from '../store/gameStore'
 import { emitSocket } from '../hooks/useSocket'
 import Modal from '../components/Modal'
 import { canShowKick, kickConfirmText } from '../utils/kick'
+import { playerName } from '../utils/profile'
 
 // Games per set offered when creating a Room. Must stay in sync with ALLOWED_MAX_GAMES in backend/src/rooms/roomManager.js.
 const MAX_GAMES_OPTIONS = [3, 4, 5]
@@ -47,6 +48,7 @@ export default function LobbyPage() {
   const myRoom = roomInfo && roomInfo.code === roomCode ? roomInfo : null
   const isHost = myRoom?.hostId === user?.id
   const players = myRoom?.players || []
+  const nameOf = (id) => playerName(id, { profiles: myRoom?.profiles, account: id === user?.id ? user : undefined })
   // Setelah set selesai, semua pemain harus kembali ke Room (Back to Room) sebelum host bisa memulai.
   const allBack = players.every(p => p.inRoom !== false)
   const ready = players.length === 4 && allBack
@@ -195,7 +197,7 @@ export default function LobbyPage() {
                   <div style={{ display:'flex', alignItems:'center', gap:10 }}>
                     <div style={s.dot(p?.connected)} />
                     <span style={{ fontSize:14, color: p ? C.text : C.muted }}>
-                      {p ? (p.id === user?.id ? `${p.id.slice(0,8)} (kamu)` : p.id.slice(0,8)) : 'Menunggu…'}
+                      {p ? (p.id === user?.id ? `${nameOf(p.id)} (kamu)` : nameOf(p.id)) : 'Menunggu…'}
                     </span>
                   </div>
                   <span style={{ display:'flex', gap:8, alignItems:'center' }}>
@@ -254,7 +256,7 @@ export default function LobbyPage() {
               } },
           ]}
         >
-          {kickConfirmText(kickTarget.slice(0, 8), players.find(p => p.id === kickTarget)?.inRoom === false)}
+          {kickConfirmText(nameOf(kickTarget), players.find(p => p.id === kickTarget)?.inRoom === false)}
         </Modal>
       )}
 

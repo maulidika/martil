@@ -60,7 +60,7 @@ const build = (rel, dest) => {
   code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
   fs.writeFileSync(path.join(OUT, dest), code)
 }
-for (const f of ['store/gameStore.js', 'utils/kick.js', 'components/Modal.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+for (const f of ['store/gameStore.js', 'utils/kick.js', 'utils/profile.js', 'components/Modal.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
 const url = (f) => pathToFileURL(path.join(OUT, f)).href
 const { useGameStore: store } = await import(url('store/gameStore.mjs'))
 const LobbyPage = (await import(url('pages/LobbyPage.mjs'))).default
@@ -127,6 +127,27 @@ t('Room: error server (mis. Mulai Game gagal) juga ditampilkan', () => {
   const html = withError('Butuh tepat 4 pemain untuk memulai game.', () => renderRoom(4))
   assert.match(html, /<div role="alert"[^>]*>Butuh tepat 4 pemain untuk memulai game\.<\/div>/)
   assert.ok(!renderRoom(4).includes('role="alert"'))
+})
+
+// ── Player names ──
+const roomWithNames = ({ profiles, user = { id: ME, username: 'Budi' } }) => {
+  const players = [ME, 'p200000000', 'p300000000'].map(id => ({ id, connected: true, inRoom: true }))
+  store.setState({ ...base, user, roomCode: 'ABC123', roomInfo: { code: 'ABC123', hostId: ME, status: 'waiting', maxGames: 4, players, gameHistory: [], ...(profiles ? { profiles } : {}) } })
+  return renderToString(React.createElement(LobbyPage)).replace(/<!-- -->/g, '')
+}
+t('Room: kursi menampilkan nama asli pemain (dan "(kamu)" untuk diri sendiri), bukan ID', () => {
+  const html = roomWithNames({ profiles: { [ME]: { username: 'Budi' }, p200000000: { username: 'Sari_Dewi' }, p300000000: { username: 'Andi' } } })
+  assert.ok(html.includes('Budi (kamu)')); assert.ok(html.includes('>Sari_Dewi<')); assert.ok(html.includes('>Andi<'))
+  for (const id of ['me000000', 'p2000000', 'p3000000']) assert.ok(!html.includes(id), `${id} tidak boleh tampil`)
+})
+t('Room: pemain tanpa profil tampil dengan ID singkat 8 karakter; diri sendiri memakai username akun', () => {
+  const html = roomWithNames({ profiles: { p200000000: { username: 'Sari_Dewi' } } })
+  assert.ok(html.includes('Budi (kamu)'), 'username akun dipakai bila profil diri sendiri belum ada')
+  assert.ok(html.includes('>Sari_Dewi<')); assert.ok(html.includes('>p3000000<'))
+})
+t('Room: tanpa peta profiles sama sekali (server lama) tetap jalan dengan ID singkat', () => {
+  const html = roomWithNames({})
+  assert.ok(html.includes('>p2000000<')); assert.ok(html.includes('>p3000000<'))
 })
 
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)

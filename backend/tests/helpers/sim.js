@@ -59,9 +59,9 @@ class FakeIO {
   _deliver(room, ev, data, exceptId) {
     for (const [, s] of this.sockets.sockets) if (s.rooms.has(room) && s.id !== exceptId) s.emit(ev, data);
   }
-  connect(userId) {
+  connect(userId, username = userId, extraClaims = {}) {
     const s = new FakeSocket(this, `sock-${++this._n}`);
-    s.handshake.auth.token = JSON.stringify({ id: userId, username: userId });
+    s.handshake.auth.token = JSON.stringify({ id: userId, username, ...extraClaims });
     let err = null;
     this._mw(s, (e) => { err = e; });
     assert.equal(err, undefined, 'middleware menolak');
