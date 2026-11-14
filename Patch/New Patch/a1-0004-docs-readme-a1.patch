@@ -1,0 +1,102 @@
+diff --git a/README.md b/README.md
+index 4502d9d..120aa6b 100644
+--- a/README.md
++++ b/README.md
+@@ -17,7 +17,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
+ | Aturan permainan, skor, peringkat set | ✅ Tersedia |
+ | Combo Detector dan Group Chain (klien) | ✅ Tersedia |
+ | Reconnect dan pemulihan sesi | ✅ Tersedia |
+-| Host Kick | ✅ Tersedia |
++| Host Kick (di Room; halaman Result tidak punya tombol Kick) | ✅ Tersedia |
+ | Validasi `cardIds`, guard payload Socket.IO, timer giliran yang tidak bisa direset aksi ditolak, perlindungan jeda antar-game | ✅ Tersedia |
+ | Jumlah game per set: hanya 3, 4, atau 5 (UI dan validasi server) | ✅ Tersedia |
+ | Satu akun hanya boleh menjadi anggota satu Room pada satu waktu (validasi server) | ✅ Tersedia |
+@@ -25,7 +25,8 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
+ | Pesan error server tampil di UI dalam bahasa Indonesia (Homepage, Room, Game, Result) | ✅ Tersedia |
+ | Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
+ | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
+-| Posisi visual berlawanan arah jarum jam | ❌ Belum (rencana) |
++| Posisi kursi berlawanan arah jarum jam (kanan, atas, kiri menurut urutan bergabung) | ✅ Tersedia |
++| Host dipertahankan selama masa tunggu reconnect 60 detik dan dikembalikan bila kursinya dipertahankan | ✅ Tersedia |
+ 
+ ---
+ 
+@@ -92,7 +93,7 @@ martil-main/
+ │
+ ├── backend/
+ │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
+-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles
++│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep
+ │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
+ │   ├── src/
+ │   │   ├── server.js            ← entry point Express + Socket.IO
+@@ -113,7 +114,7 @@ martil-main/
+ │   └── tests/
+ │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
+ │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
+-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js
++│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js
+ │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
+ │
+ └── frontend/
+@@ -340,7 +341,9 @@ Setiap kali socket tersambung (login, refresh, atau reconnect otomatis), klien m
+ Aturan server:
+ - Satu pemain punya satu socket aktif per Room; disconnect dari socket lama tidak menandai pemain terputus.
+ - `start_game`, `play_cards`, `skip_turn` ditolak (`NOT_IN_ROOM`) dari socket yang belum dipulihkan.
+-- Room `waiting`/`done`: pemain terputus > 60 dtk dikeluarkan dan Host berpindah ke pemain terhubung. Room `playing`: kursi dipertahankan (giliran yang lewat di-auto-skip) sampai pemain kembali.
++- Room `waiting`/`done`: pemain terputus **lebih dari** 60 dtk dikeluarkan dan Host berpindah ke pemain terhubung. Room `playing`: kursi dipertahankan (giliran yang lewat di-auto-skip) sampai pemain kembali.
++- **Host dan masa tunggu.** Disconnect sementara tidak pernah memindahkan Host: Host dipertahankan selama masa tunggu 60 detik (dihitung sejak server mendeteksi putusnya koneksi) di semua status Room, dan Host yang kembali dalam masa itu tetap Host. Host berpindah hanya bila Host benar-benar keluar (`leave_room`, seketika) atau masa tunggu habis. Bila game sedang berjalan, Host yang terputus lebih dari 60 detik digeser ke pemain terhubung berikutnya tetapi kursinya dipertahankan, dan peran Host **dikembalikan** begitu ia reconnect (selama Host sementara itu masih Host; perubahan Host lain, misalnya Host sementara keluar, membatalkannya). Pada Room menunggu/selesai kursi Host yang kedaluwarsa dihapus, jadi Host tidak kembali. ID pemain tidak pernah berubah.
++- **Mendiagnosis perpindahan Host.** Setiap perubahan Host tercatat di log backend sebagai `ROOM_HOST_CHANGED` dengan `previousHostId`, `reason` (`HOST_DISCONNECT_EXPIRED`, `HOST_SEAT_REMOVED`, `HOST_RECONNECTED`) dan `hostDisconnectedForMs`. Alasan putusnya koneksi tercatat di `SOCKET_DISCONNECTING` (field `reason`, mis. `ping timeout` atau `transport close`). Tab browser yang dibekukan atau di-sleep di background tidak membalas heartbeat Socket.IO sehingga terbaca sebagai disconnect; bila tab itu baru kembali setelah lebih dari masa tunggu, Host berpindah sesuai aturan di atas (penyebab ini belum diverifikasi pada kasus nyata, hanya cocok dengan perilaku kode dan simulasi).
+ - Pembersih berjalan tiap 10 detik; Room yang ditinggalkan semua pemain > 10 menit ditutup beserta timernya.
+ 
+ Di klien, `ConnectionOverlay` menampilkan "Menghubungkan kembali..." dan berubah menjadi pesan gagal + tombol *Coba lagi* bila lebih dari 20 detik (atau 8 detik tanpa jawaban resume). Layar "Menunggu data game…" meminta ulang state setelah 6 detik dan menampilkan pesan + tombol setelah 15 detik.
+@@ -348,7 +351,7 @@ Di klien, `ConnectionOverlay` menampilkan "Menghubungkan kembali..." dan berubah
+ ### Host Kick
+ - Hanya Host; tidak bisa mengeluarkan diri sendiri; tidak bisa saat game berlangsung (`GAME_IN_PROGRESS`). Semua validasi di server (`roomManager.kickPlayer`).
+ - Target berada di **Room** → dihapus dari Room dan menerima `kicked` (kembali ke Menu Utama). Ini bukan ban: boleh bergabung lagi.
+-- Target masih di **Result** → dihapus dari kursi Room tetapi tetap melihat hasil set, dengan pembatasan (`kicked_from_result`): Back to Room ditolak (`KICKED_FROM_ROOM`) dan ia tidak bisa membuat/bergabung Room sebelum kembali ke Menu Utama (`leave_room`). Pembatasan bertahan setelah refresh/reconnect dan berakhir dengan timeout disconnect yang sama seperti pemain biasa (60 detik).
++- *(Tidak ada tombol Kick di halaman Result lagi; bagian ini hanya menjelaskan apa yang masih diterima server.)* Target masih di **Result** → dihapus dari kursi Room tetapi tetap melihat hasil set, dengan pembatasan (`kicked_from_result`): Back to Room ditolak (`KICKED_FROM_ROOM`) dan ia tidak bisa membuat/bergabung Room sebelum kembali ke Menu Utama (`leave_room`). Pembatasan bertahan setelah refresh/reconnect dan berakhir dengan timeout disconnect yang sama seperti pemain biasa (60 detik).
+ 
+ ### Log
+ Backend mencetak log berawalan `[MARTIL ...]` (mis. `SOCKET_CONNECTED`, `SESSION_RESTORED`, `PLAYER_DISCONNECTED`, `AUTO_SKIP`, `SET_OVER`, `LEAVE_ROOM_REQUEST`, `PLAYER_KICKED`). `engine.js` juga mencetak `[rally-debug]` pada setiap Main/Skip. Di console browser: `SOCKET_CONNECTED/DISCONNECTED`, `SESSION_RESTORED`, `SESSION_NONE`, `SESSION_REPLACED`, `SYNC_FAILED`, `SET_OVER_RECEIVED`, `ROOM_LEFT_CONFIRMED`.
+@@ -363,7 +366,7 @@ Semua uji di bawah berjalan **tanpa browser dan tanpa WebSocket asli**: server d
+ ```bash
+ npm run test:sim     # protokol resume, timer, host, kadaluarsa
+ npm run test:nav     # satu set penuh dimainkan bot, lalu Back to Room / Exit Room
+-npm run test:kick    # Host Kick di Room dan di Result
++npm run test:kick    # Host Kick di Room dan di Result (sisi server)
+ npm run test:cardids # validasi cardIds (duplikat, tipe salah, format) di engine dan lewat socket
+ npm run test:payload # guard payload semua handler Socket.IO + jaring pengaman INTERNAL_ERROR
+ npm run test:timer   # aksi ditolak tidak menyentuh timer giliran (spy setTimeout/clearTimeout)
+@@ -371,6 +374,7 @@ npm run test:intermission  # play/skip ditolak GAME_STARTING selama jeda antar-g
+ npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepat waktunya
+ npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
+ npm run test:profiles  # profil publik: nama di setiap state Room, daftar putih field, pembersihan username, pembekuan nama di hasil set
++npm run test:hostkeep  # Host dipertahankan selama masa tunggu 60 dtk, dikembalikan bila kursi dipertahankan, alasan di event host_changed
+ npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
+ npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
+ ```
+@@ -380,7 +384,7 @@ npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.
+ bash tests/sync.sim/run.sh    # state machine koneksi klien (socket, react, router palsu)
+ bash tests/game-ui/run.sh     # layout, posisi kursi, profil sementara, format koin
+ bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render GamePage
+-bash tests/kick-ui/run.sh     # logika Kick; render ResultPage/LobbyPage
++bash tests/kick-ui/run.sh     # logika Kick (Room); render ResultPage (tanpa tombol Kick) dan LobbyPage
+ bash tests/lobby-ui/run.sh    # render Homepage/Room: pilihan jumlah game per set 3, 4, 5 dan tampilan error server
+ bash tests/server-errors/run.sh  # peta pesan error vs semua kode error yang bisa dikirim backend (tanpa browser)
+ bash tests/player-names/run.sh   # nama pemain di UI: prioritas sumber nama, pesan toast, dan penjaga agar tidak ada pemotongan ID manual
+@@ -419,11 +423,11 @@ Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otoma
+ 
+ ---
+ 
+-## 🗺️ Roadmap (rencana — BELUM diimplementasikan)
++## 🗺️ Roadmap
+ 
+-Bagian ini hanya mendokumentasikan arah pengembangan. **Tidak satu pun poin di bawah sudah ada di kode.**
++Bagian ini mendokumentasikan arah pengembangan. Poin A sudah selesai, B baru sebagian (nama pemain), dan **C, D, dan E belum ada di kode.**
+ 
+-**A. Posisi pemain di meja.** Tampilan sudah memakai empat posisi (pemain utama di bawah, lawan kiri/atas/kanan). Rencana: arah posisi visual mengelilingi meja menjadi **berlawanan arah jarum jam**. Hanya pemetaan posisi visual yang berubah; urutan giliran dan validasi permainan tidak berubah.
++**A. Posisi pemain di meja. ✅ Selesai.** Pemain sendiri selalu di bawah; pemain yang bermain berikutnya (menurut urutan bergabung ke Room) di kanan, lalu atas, lalu kiri, yaitu berlawanan arah jarum jam. Contoh dari sudut pandang Host: Player 1 bawah, Player 2 kanan, Player 3 atas, Player 4 kiri; dari sudut pandang Player 2: Player 3 kanan, Player 4 atas, Player 1 kiri. Hanya posisi tampilan yang berubah (`seatSides` di `frontend/src/utils/gameLayout.js`, termasuk layout sempit di HP); urutan giliran, validasi, dan ID pemain tidak berubah.
+ 
+ **B. Profil pemain.** *Sudah ada:* nama pemain asli (bukan ID acak). *Belum ada:* avatar, level, dan informasi profil lain. ID internal pemain tetap unik dan tidak bergantung pada username. Informasi publik pemain dikirim lewat backend dengan daftar field yang eksplisit (tanpa email/hash password). **Keputusan:** username nantinya dibuat unik dan tidak membedakan huruf besar/kecil (case-insensitive). Saat ini username masih case-sensitive.
+ 
