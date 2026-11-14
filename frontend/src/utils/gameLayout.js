@@ -43,16 +43,18 @@ export function computeLayout(w, h) {
 
 /**
  * Posisi kursi lawan mengelilingi meja (pemain utama selalu di bawah), proporsional untuk 1–3 lawan.
- * Urutan `opponents` = urutan giliran setelah pemain utama: searah jarum jam → kiri, atas, kanan.
+ * Urutan `opponents` = urutan giliran setelah pemain utama (lihat orderOpponents).
+ * Arah visual BERLAWANAN arah jarum jam: yang bermain berikutnya di kanan, lalu atas, lalu kiri.
+ * Hanya posisi tampilan; urutan giliran dan ID pemain tidak berubah.
  */
 export function seatSides(n) {
   if (n <= 0) return []
   if (n === 1) return ['top']
-  if (n === 2) return ['left', 'right']
-  return ['left', 'top', 'right', ...Array(Math.max(0, n - 3)).fill('top')]
+  if (n === 2) return ['right', 'left']
+  return ['right', 'top', 'left', ...Array(Math.max(0, n - 3)).fill('top')]
 }
 
-/** Urutkan lawan sesuai urutan duduk relatif terhadap pemain utama (yang bermain setelah saya di kiri). */
+/** Urutkan lawan sesuai urutan bergabung ke Room, dimulai dari yang bermain tepat setelah pemain utama (seat pertama = kanan). */
 export function orderOpponents(opponents, seatOrderIds, myId) {
   if (!seatOrderIds?.length || !seatOrderIds.includes(myId)) return opponents
   const byId = Object.fromEntries(opponents.map(o => [o.id, o]))

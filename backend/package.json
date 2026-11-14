@@ -17,7 +17,8 @@
     "test:intermission": "node tests/intermission.sim.js",
     "test:maxgames": "node tests/max-games.sim.js",
     "test:singleroom": "node tests/single-room.sim.js",
-    "test:profiles": "node tests/profiles.sim.js"
+    "test:profiles": "node tests/profiles.sim.js",
+    "test:hostkeep": "node tests/host-retention.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

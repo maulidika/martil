@@ -120,17 +120,19 @@ t('Result: ukuran/proporsi konten dipertahankan (maxWidth 400, ukuran tombol 13p
   assert.match(html, /padding:\s*13px[^>]*font-size:\s*15px|font-size:\s*15px[^>]*padding:\s*13px/)
 })
 
-// ── 2. Kick di Result ──
-t('Result: Host melihat tombol Kick untuk 3 pemain lain (tidak untuk dirinya)', () => {
+// ── 2. Kick TIDAK ada di Result (fitur Kick hanya di Room) ──
+t('Result: Host tidak lagi melihat tombol Kick untuk siapa pun (Kick hanya tersedia di Room)', () => {
   const html = renderResult()
-  assert.equal(count(html, />Kick</g), 3)
+  assert.equal(count(html, />Kick</g), 0)
+  assert.ok(!html.includes('kick-confirm'), 'tidak boleh ada modal konfirmasi Kick di Result')
 })
 t('Result: non-Host tidak melihat tombol Kick', () => {
   assert.equal(count(renderResult({ me: IDS[1], host: IDS[0] }), />Kick</g), 0)
 })
-t('Result: pemain yang sudah tidak ada di room tidak punya tombol Kick; hasilnya tetap tampil', () => {
+t('Result: tidak ada tombol Kick walau ada pemain yang sudah keluar; hasilnya tetap tampil lengkap', () => {
   const html = renderResult({ members: [IDS[0], IDS[1], IDS[2]] })
-  assert.equal(count(html, />Kick</g), 2); assert.ok(html.includes(IDS[3].slice(0, 8)))
+  assert.equal(count(html, />Kick</g), 0); assert.ok(html.includes(IDS[3].slice(0, 8)))
+  for (const id of IDS) assert.ok(html.includes(id.slice(0, 8)), `${id.slice(0, 8)} harus tetap tampil di peringkat`)
 })
 t('Result: tidak ada modal secara default maupun otomatis setelah di-Kick (restricted=true, modal tertutup)', () => {
   assert.ok(!renderResult().includes('Akses Room Dibatasi'))

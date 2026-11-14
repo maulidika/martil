@@ -1,0 +1,146 @@
+diff --git a/frontend/src/utils/gameLayout.js b/frontend/src/utils/gameLayout.js
+index 9259b4c..1099c22 100644
+--- a/frontend/src/utils/gameLayout.js
++++ b/frontend/src/utils/gameLayout.js
+@@ -43,16 +43,18 @@ export function computeLayout(w, h) {
+ 
+ /**
+  * Posisi kursi lawan mengelilingi meja (pemain utama selalu di bawah), proporsional untuk 1–3 lawan.
+- * Urutan `opponents` = urutan giliran setelah pemain utama: searah jarum jam → kiri, atas, kanan.
++ * Urutan `opponents` = urutan giliran setelah pemain utama (lihat orderOpponents).
++ * Arah visual BERLAWANAN arah jarum jam: yang bermain berikutnya di kanan, lalu atas, lalu kiri.
++ * Hanya posisi tampilan; urutan giliran dan ID pemain tidak berubah.
+  */
+ export function seatSides(n) {
+   if (n <= 0) return []
+   if (n === 1) return ['top']
+-  if (n === 2) return ['left', 'right']
+-  return ['left', 'top', 'right', ...Array(Math.max(0, n - 3)).fill('top')]
++  if (n === 2) return ['right', 'left']
++  return ['right', 'top', 'left', ...Array(Math.max(0, n - 3)).fill('top')]
+ }
+ 
+-/** Urutkan lawan sesuai urutan duduk relatif terhadap pemain utama (yang bermain setelah saya di kiri). */
++/** Urutkan lawan sesuai urutan bergabung ke Room, dimulai dari yang bermain tepat setelah pemain utama (seat pertama = kanan). */
+ export function orderOpponents(opponents, seatOrderIds, myId) {
+   if (!seatOrderIds?.length || !seatOrderIds.includes(myId)) return opponents
+   const byId = Object.fromEntries(opponents.map(o => [o.id, o]))
+diff --git a/frontend/tests/combo-ui/render.mjs b/frontend/tests/combo-ui/render.mjs
+index 51c0cb0..9fcaeb9 100644
+--- a/frontend/tests/combo-ui/render.mjs
++++ b/frontend/tests/combo-ui/render.mjs
+@@ -142,21 +142,21 @@ const seatOrder = (html) => [...html.matchAll(/data-seat="(\w+)"/g)].map(m => m[
+ const OPP3 = [{ id: 'aaaa1111', cardCount: 13 }, { id: 'bbbb2222', cardCount: 9 }, { id: 'cccc3333', cardCount: 4 }]
+ t('Redesign: 3 lawan duduk kiri/atas/kanan, pemain utama di bawah; tiap kursi menampilkan nama dan jumlah kartu', () => {
+   const html = render({ opp: OPP3 }).html
+-  assert.deepEqual(seatOrder(html), ['left', 'top', 'right', 'me'])
++  assert.deepEqual(seatOrder(html), ['right', 'top', 'left', 'me'])
+   for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
+   for (const n of ['13', '9', '4']) assert.ok(html.includes(`aria-label="${n} kartu"`), `tumpukan kartu ${n} tidak ada`)
+   assert.ok(html.includes('Syamil_Jumaries')); assert.ok(html.includes('aria-label="sisa kartu"'))
+ })
+ t('Redesign: tata letak proporsional untuk 2 dan 1 lawan', () => {
+-  assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 2) }).html), ['left', 'right', 'me'])
++  assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 2) }).html), ['right', 'left', 'me'])
+   assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 1) }).html), ['top', 'me'])
+ })
+-t('Redesign: urutan duduk mengikuti urutan giliran (pemain setelah saya di kiri)', () => {
++t('Redesign: urutan duduk mengikuti urutan giliran (pemain setelah saya di kanan, lalu atas, lalu kiri)', () => {
+   const players = ['aaaa1111', 'me', 'bbbb2222', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
+   const html = render({ opp: OPP3, players }).html
+   const marks = [...html.matchAll(/data-seat="(\w+)"/g)].map(m => ({ side: m[1], i: m.index }))
+   const at = (side) => { const k = marks.findIndex(m => m.side === side); const seg = html.slice(marks[k].i, marks[k + 1]?.i ?? html.length); return OPP3.map(o => o.id).find(id => seg.includes(id.slice(0, 8))) }
+-  assert.equal(at('left'), 'bbbb2222'); assert.equal(at('top'), 'cccc3333'); assert.equal(at('right'), 'aaaa1111')
++  assert.equal(at('right'), 'bbbb2222'); assert.equal(at('top'), 'cccc3333'); assert.equal(at('left'), 'aaaa1111')
+ })
+ t('Redesign: cincin timer hanya pada pemain yang sedang giliran', () => {
+   const mine = render({ opp: OPP3, turn: 'me' }).html, theirs = render({ opp: OPP3, turn: 'bbbb2222' }).html
+@@ -195,7 +195,7 @@ t('Redesign: profil memiliki avatar, level (placeholder) dan koin (dummy) untuk
+ })
+ t('Redesign: layar sempit menampilkan seluruh kursi, kontrol, dan umpan balik seleksi', () => {
+   const r = render({ width: 390, opp: OPP3, selected: ['3D', '4H'] })
+-  assert.deepEqual(seatOrder(r.html), ['left', 'top', 'right', 'me'])
++  assert.deepEqual(seatOrder(r.html), ['right', 'top', 'left', 'me'])
+   assert.ok(r.html.includes('Kombinasi tidak valid'))
+   for (const l of ['SKIP', 'PLAY', 'CLEAR']) assert.ok(r.btn(l))
+ })
+@@ -232,4 +232,27 @@ t('Game: tanpa profiles tetap jalan: lawan tampil dengan ID singkat 8 karakter (
+   for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
+ })
+ 
++// ── Seat direction: counter-clockwise, by join order ──
++// The element that positions a seat is the parent <div> of the one carrying data-seat.
++const seatTag = (html, side) => { const i = html.indexOf(`data-seat="${side}"`); const open = html.lastIndexOf('<div', html.lastIndexOf('<div', i) - 1); return html.slice(open, html.indexOf('>', open)) }
++const seatNames = (html) => Object.fromEntries(['right', 'top', 'left'].map(side => {
++  const marks = [...html.matchAll(/data-seat="(\w+)"/g)].map(m => ({ side: m[1], i: m.index }))
++  const k = marks.findIndex(m => m.side === side); const seg = html.slice(marks[k].i, marks[k + 1]?.i ?? html.length)
++  return [side, ['Sari_Dewi', 'Andi', 'Dewi'].find(n => seg.includes(n)) ?? null]
++}))
++const HOST_VIEW = { me: { username: 'Syamil_Jumaries' }, aaaa1111: { username: 'Sari_Dewi' }, bbbb2222: { username: 'Andi' }, cccc3333: { username: 'Dewi' } }
++const hostPlayers = ['me', 'aaaa1111', 'bbbb2222', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
++t('Contoh Host: saya bawah, Player 2 kanan, Player 3 atas, Player 4 kiri (layar lebar)', () => {
++  assert.deepEqual(seatNames(render({ opp: OPP3, players: hostPlayers, profiles: HOST_VIEW }).html), { right: 'Sari_Dewi', top: 'Andi', left: 'Dewi' })
++})
++t('Contoh Host: susunan yang sama di layar sempit (kolom: kiri=Player 4, tengah=Player 3, kanan=Player 2)', () => {
++  const r = render({ width: 390, opp: OPP3, players: hostPlayers, profiles: HOST_VIEW })
++  assert.deepEqual(seatNames(r.html), { right: 'Sari_Dewi', top: 'Andi', left: 'Dewi' })
++  assert.match(seatTag(r.html, 'right'), /left:\s*66\.666%/); assert.match(seatTag(r.html, 'top'), /left:\s*33\.333%/); assert.match(seatTag(r.html, 'left'), /left:\s*0%/)
++})
++t('Sudut pandang pemain ke-3: pemain ke-4 di kanan, pemain ke-1 di atas, pemain ke-2 di kiri', () => {
++  const players = ['aaaa1111', 'bbbb2222', 'me', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
++  assert.deepEqual(seatNames(render({ opp: OPP3, players, profiles: HOST_VIEW }).html), { right: 'Dewi', top: 'Sari_Dewi', left: 'Andi' })
++})
++
+ console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)
+diff --git a/frontend/tests/game-ui/run.mjs b/frontend/tests/game-ui/run.mjs
+index 04c599e..5b0b7b0 100644
+--- a/frontend/tests/game-ui/run.mjs
++++ b/frontend/tests/game-ui/run.mjs
+@@ -51,11 +51,11 @@ t('daftar Combo Detector boleh tumbuh ke atas tetapi tidak menimpa kursi kiri',
+   }
+ })
+ 
+-t('posisi kursi proporsional: 1 lawan = atas; 2 = kiri/kanan; 3 = kiri/atas/kanan', () => {
++t('posisi kursi proporsional (berlawanan arah jarum jam): 1 lawan = atas; 2 = kanan/kiri; 3 = kanan/atas/kiri', () => {
+   assert.deepEqual(seatSides(0), []); assert.deepEqual(seatSides(1), ['top'])
+-  assert.deepEqual(seatSides(2), ['left', 'right']); assert.deepEqual(seatSides(3), ['left', 'top', 'right'])
++  assert.deepEqual(seatSides(2), ['right', 'left']); assert.deepEqual(seatSides(3), ['right', 'top', 'left'])
+ })
+-t('urutan duduk: lawan yang bermain setelah saya ada di kiri, lalu atas, lalu kanan', () => {
++t('urutan duduk: lawan yang bermain setelah saya didahulukan (seat pertama), lalu berikutnya, lalu yang terakhir', () => {
+   const opp = [{ id: 'a' }, { id: 'c' }, { id: 'd' }]                // urutan asli tanpa saya
+   assert.deepEqual(orderOpponents(opp, ['a', 'me', 'c', 'd'], 'me').map(o => o.id), ['c', 'd', 'a'])
+   assert.deepEqual(orderOpponents(opp, ['me', 'a', 'c', 'd'], 'me').map(o => o.id), ['a', 'c', 'd'])
+@@ -67,6 +67,32 @@ t('urutan duduk: data anggota room tidak cocok / kosong → urutan asli (tidak m
+   assert.deepEqual(orderOpponents(opp, ['a', 'c', 'd'], 'me'), opp)             // saya tidak ada di daftar
+   assert.deepEqual(orderOpponents(opp, ['a', 'me', 'x', 'd'], 'me'), opp)       // peserta tidak sama
+ })
++// Where each player sits for `me`, given the Room's join order. Sides come from seatSides, order from orderOpponents.
++const seatMap = (players, me) => {
++  const opp = players.filter(id => id !== me).map(id => ({ id }))
++  const ordered = orderOpponents(opp, players, me), sides = seatSides(ordered.length)
++  return Object.fromEntries(ordered.map((o, i) => [sides[i], o.id]))
++}
++t('contoh Host: P1 bawah, P2 kanan, P3 atas, P4 kiri (berlawanan arah jarum jam)', () => {
++  assert.deepEqual(seatMap(['P1', 'P2', 'P3', 'P4'], 'P1'), { right: 'P2', top: 'P3', left: 'P4' })
++})
++t('setiap pemain selalu di bawah menurut sudut pandangnya sendiri; yang berikutnya di kanan, lalu atas, lalu kiri', () => {
++  const players = ['P1', 'P2', 'P3', 'P4']
++  assert.deepEqual(seatMap(players, 'P2'), { right: 'P3', top: 'P4', left: 'P1' })
++  assert.deepEqual(seatMap(players, 'P3'), { right: 'P4', top: 'P1', left: 'P2' })
++  assert.deepEqual(seatMap(players, 'P4'), { right: 'P1', top: 'P2', left: 'P3' })
++})
++t('posisi mengikuti URUTAN BERGABUNG, bukan isi/urutan abjad ID', () => {
++  const ids = ['zzz9', 'mmm5', 'aaa1', 'kkk3']                       // urutan bergabung; ID sengaja tidak terurut
++  assert.deepEqual(seatMap(ids, 'zzz9'), { right: 'mmm5', top: 'aaa1', left: 'kkk3' })
++  assert.deepEqual(seatMap(ids, 'aaa1'), { right: 'kkk3', top: 'zzz9', left: 'mmm5' })
++  assert.deepEqual(seatMap([...ids].reverse(), 'zzz9'), { right: 'kkk3', top: 'aaa1', left: 'mmm5' })   // urutan bergabung berbeda → posisi berbeda
++})
++t('urutan giliran/ID tidak diubah oleh tata letak: orderOpponents hanya memutar, tidak mengacak', () => {
++  const opp = [{ id: 'P2' }, { id: 'P3' }, { id: 'P4' }]
++  const out = orderOpponents(opp, ['P1', 'P2', 'P3', 'P4'], 'P1')
++  assert.deepEqual(out.map(o => o.id), ['P2', 'P3', 'P4']); assert.deepEqual(opp.map(o => o.id), ['P2', 'P3', 'P4'])
++})
+ t('cincin timer: 30 dtk = 100%, 15 dtk = 50%, 0 = 0%, tidak keluar rentang', () => {
+   assert.equal(turnRingPct(30), 100); assert.equal(turnRingPct(15), 50); assert.equal(turnRingPct(0), 0)
+   assert.equal(turnRingPct(45), 100); assert.equal(turnRingPct(-3), 0); assert.equal(turnRingPct(null), 100)

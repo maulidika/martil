@@ -88,6 +88,7 @@ function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES, username) {
     setId: null,
     setScores: {},
     currentGame: null,
+    hostDisplacement: null,   // { from, to }: Host role moved from `from` to `to` because `from` stayed disconnected past the grace period
     // true from the moment a game ends until the next one is announced (`game_started`).
     // The next game's state already exists during this ~5 s gap, but nobody may act on it yet.
     intermission: false,
@@ -308,6 +309,7 @@ function leaveRoom(code, playerId) {
   if (room.hostId === playerId) {
     newHostId = _pickNextHost(room)?.id || null;
     room.hostId = newHostId;
+    room.hostDisplacement = null;   // the Host left on purpose: nothing to give back
   }
 
   const roomDeleted = room.players.length === 0;
@@ -459,6 +461,21 @@ function findRoomByPlayer(userId, hintCode = null) {
 }
 
 /**
+ * Give the Host role back to a player whose Host role moved away only because they were disconnected for longer than
+ * the grace period while their seat was kept (a game in progress). Applies only while the interim Host the migration
+ * chose is still the Host; any other Host change (the interim Host leaving, ...) cancels it. Never touches ids.
+ * Only called by resumeSession, i.e. for a player who is a member of the Room.
+ * @returns {{previousHostId: string}|null}
+ */
+function _reclaimHost(room, playerId) {
+  const d = room.hostDisplacement;
+  if (!d || d.from !== playerId || room.hostId !== d.to) return null;
+  room.hostId = playerId;
+  room.hostDisplacement = null;
+  return { previousHostId: d.to };
+}
+
+/**
  * Hapus pemain yang terputus melebihi batas waktu (room waiting/done) dan
  * pindahkan host bila perlu. Return daftar event untuk di-broadcast.
  * Pemain di game yang sedang berjalan TIDAK dihapus (kursi dipertahankan).
@@ -487,8 +504,16 @@ function _expireRoom(room, now) {
   if (hostGone) {
     const next = room.players.find(p => p.connected && p.id !== room.hostId) || (!host ? room.players[0] : null);
     if (next && next.id !== room.hostId) {
+      const previousHostId = room.hostId;
       room.hostId = next.id;
-      events.push({ type: 'host_changed', code, hostId: next.id });
+      // A game in progress keeps the old Host's seat: remember who was displaced so the Host role returns to them
+      // if they reconnect (see _reclaimHost). When the seat was removed there is nothing to return to.
+      room.hostDisplacement = host ? { from: previousHostId, to: next.id } : null;
+      events.push({
+        type: 'host_changed', code, hostId: next.id, previousHostId,
+        reason: host ? 'HOST_DISCONNECT_EXPIRED' : 'HOST_SEAT_REMOVED',
+        hostDisconnectedForMs: host?.disconnectedAt != null ? now - host.disconnectedAt : null,
+      });
     }
   }
   return events;
@@ -557,6 +582,8 @@ function resumeSession(userId, socketId, now = Date.now(), hintCode = null) {
   p.connected = true;
   p.disconnectedAt = null;
   p.socketId = socketId;
+  const reclaimed = _reclaimHost(room, userId);
+  if (reclaimed) events.push({ type: 'host_changed', code: room.code, hostId: userId, previousHostId: reclaimed.previousHostId, reason: 'HOST_RECONNECTED' });
   return { ok: true, room, wasDisconnected, previousSocketId, events };
 }
 

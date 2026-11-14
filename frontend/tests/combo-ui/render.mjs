@@ -142,21 +142,21 @@ const seatOrder = (html) => [...html.matchAll(/data-seat="(\w+)"/g)].map(m => m[
 const OPP3 = [{ id: 'aaaa1111', cardCount: 13 }, { id: 'bbbb2222', cardCount: 9 }, { id: 'cccc3333', cardCount: 4 }]
 t('Redesign: 3 lawan duduk kiri/atas/kanan, pemain utama di bawah; tiap kursi menampilkan nama dan jumlah kartu', () => {
   const html = render({ opp: OPP3 }).html
-  assert.deepEqual(seatOrder(html), ['left', 'top', 'right', 'me'])
+  assert.deepEqual(seatOrder(html), ['right', 'top', 'left', 'me'])
   for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
   for (const n of ['13', '9', '4']) assert.ok(html.includes(`aria-label="${n} kartu"`), `tumpukan kartu ${n} tidak ada`)
   assert.ok(html.includes('Syamil_Jumaries')); assert.ok(html.includes('aria-label="sisa kartu"'))
 })
 t('Redesign: tata letak proporsional untuk 2 dan 1 lawan', () => {
-  assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 2) }).html), ['left', 'right', 'me'])
+  assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 2) }).html), ['right', 'left', 'me'])
   assert.deepEqual(seatOrder(render({ opp: OPP3.slice(0, 1) }).html), ['top', 'me'])
 })
-t('Redesign: urutan duduk mengikuti urutan giliran (pemain setelah saya di kiri)', () => {
+t('Redesign: urutan duduk mengikuti urutan giliran (pemain setelah saya di kanan, lalu atas, lalu kiri)', () => {
   const players = ['aaaa1111', 'me', 'bbbb2222', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
   const html = render({ opp: OPP3, players }).html
   const marks = [...html.matchAll(/data-seat="(\w+)"/g)].map(m => ({ side: m[1], i: m.index }))
   const at = (side) => { const k = marks.findIndex(m => m.side === side); const seg = html.slice(marks[k].i, marks[k + 1]?.i ?? html.length); return OPP3.map(o => o.id).find(id => seg.includes(id.slice(0, 8))) }
-  assert.equal(at('left'), 'bbbb2222'); assert.equal(at('top'), 'cccc3333'); assert.equal(at('right'), 'aaaa1111')
+  assert.equal(at('right'), 'bbbb2222'); assert.equal(at('top'), 'cccc3333'); assert.equal(at('left'), 'aaaa1111')
 })
 t('Redesign: cincin timer hanya pada pemain yang sedang giliran', () => {
   const mine = render({ opp: OPP3, turn: 'me' }).html, theirs = render({ opp: OPP3, turn: 'bbbb2222' }).html
@@ -195,7 +195,7 @@ t('Redesign: profil memiliki avatar, level (placeholder) dan koin (dummy) untuk 
 })
 t('Redesign: layar sempit menampilkan seluruh kursi, kontrol, dan umpan balik seleksi', () => {
   const r = render({ width: 390, opp: OPP3, selected: ['3D', '4H'] })
-  assert.deepEqual(seatOrder(r.html), ['left', 'top', 'right', 'me'])
+  assert.deepEqual(seatOrder(r.html), ['right', 'top', 'left', 'me'])
   assert.ok(r.html.includes('Kombinasi tidak valid'))
   for (const l of ['SKIP', 'PLAY', 'CLEAR']) assert.ok(r.btn(l))
 })
@@ -230,6 +230,29 @@ t('Game: status "Menunggu ..." memakai nama pemain yang gilirannya', () => {
 t('Game: tanpa profiles tetap jalan: lawan tampil dengan ID singkat 8 karakter (perilaku lama)', () => {
   const html = render({ opp: OPP3 }).html
   for (const o of OPP3) assert.ok(html.includes(o.id.slice(0, 8)))
+})
+
+// ── Seat direction: counter-clockwise, by join order ──
+// The element that positions a seat is the parent <div> of the one carrying data-seat.
+const seatTag = (html, side) => { const i = html.indexOf(`data-seat="${side}"`); const open = html.lastIndexOf('<div', html.lastIndexOf('<div', i) - 1); return html.slice(open, html.indexOf('>', open)) }
+const seatNames = (html) => Object.fromEntries(['right', 'top', 'left'].map(side => {
+  const marks = [...html.matchAll(/data-seat="(\w+)"/g)].map(m => ({ side: m[1], i: m.index }))
+  const k = marks.findIndex(m => m.side === side); const seg = html.slice(marks[k].i, marks[k + 1]?.i ?? html.length)
+  return [side, ['Sari_Dewi', 'Andi', 'Dewi'].find(n => seg.includes(n)) ?? null]
+}))
+const HOST_VIEW = { me: { username: 'Syamil_Jumaries' }, aaaa1111: { username: 'Sari_Dewi' }, bbbb2222: { username: 'Andi' }, cccc3333: { username: 'Dewi' } }
+const hostPlayers = ['me', 'aaaa1111', 'bbbb2222', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
+t('Contoh Host: saya bawah, Player 2 kanan, Player 3 atas, Player 4 kiri (layar lebar)', () => {
+  assert.deepEqual(seatNames(render({ opp: OPP3, players: hostPlayers, profiles: HOST_VIEW }).html), { right: 'Sari_Dewi', top: 'Andi', left: 'Dewi' })
+})
+t('Contoh Host: susunan yang sama di layar sempit (kolom: kiri=Player 4, tengah=Player 3, kanan=Player 2)', () => {
+  const r = render({ width: 390, opp: OPP3, players: hostPlayers, profiles: HOST_VIEW })
+  assert.deepEqual(seatNames(r.html), { right: 'Sari_Dewi', top: 'Andi', left: 'Dewi' })
+  assert.match(seatTag(r.html, 'right'), /left:\s*66\.666%/); assert.match(seatTag(r.html, 'top'), /left:\s*33\.333%/); assert.match(seatTag(r.html, 'left'), /left:\s*0%/)
+})
+t('Sudut pandang pemain ke-3: pemain ke-4 di kanan, pemain ke-1 di atas, pemain ke-2 di kiri', () => {
+  const players = ['aaaa1111', 'bbbb2222', 'me', 'cccc3333'].map(id => ({ id, connected: true, inRoom: true }))
+  assert.deepEqual(seatNames(render({ opp: OPP3, players, profiles: HOST_VIEW }).html), { right: 'Dewi', top: 'Sari_Dewi', left: 'Andi' })
 })
 
 console.log(`\n${pass}/${pass + fail} lulus (render)`); process.exit(fail ? 1 : 0)

@@ -2,7 +2,7 @@ import React from 'react'
 import { useGameStore } from '../store/gameStore'
 import { emitSocket } from '../hooks/useSocket'
 import Modal from '../components/Modal'
-import { canShowKick, kickConfirmText, backToRoomDecision, RESTRICTED_MODAL } from '../utils/kick'
+import { backToRoomDecision, RESTRICTED_MODAL } from '../utils/kick'
 import { playerName } from '../utils/profile'
 
 const C = { bg:'#1a1a2e', surface:'#16213e', accent:'#e94560', text:'#eee', muted:'#888', gold:'#f1c40f', silver:'#bdc3c7', bronze:'#e67e22', green:'#2ecc71', red:'#e74c3c' }
@@ -12,7 +12,6 @@ const PRIZE_COLOR = [C.green, C.green, C.red, C.red]
 
 export default function ResultPage() {
   const { setResult, user, roomInfo, roomCode, connected, setError, events, error, restricted, restrictedModalOpen, openRestrictedModal, closeRestrictedModal } = useGameStore()
-  const [kickTarget, setKickTarget] = React.useState(null)   // id pemain yang menunggu konfirmasi Kick
   // 'room' = menunggu jawaban Back to Room, 'menu' = menunggu jawaban Back to Menu Utama
   const [busy, setBusy] = React.useState(null)
 
@@ -58,18 +57,7 @@ export default function ResultPage() {
   const goRoom = () => sendRoomAction('room', 'return_to_room', 'RETURN_TO_ROOM_CLICKED', 'Gagal mengirim permintaan kembali ke room. Periksa koneksi server.')
   const goMenu = () => sendRoomAction('menu', 'leave_room', 'LEAVE_ROOM_CLICKED', 'Gagal mengirim permintaan keluar room. Periksa koneksi server.')
 
-  // Host Kick: konfirmasi dulu, lalu server memvalidasi (hanya Host, bukan saat game berlangsung).
-  const players = roomInfo?.players || []
-  const showKick = (id) => canShowKick({ myId: user?.id, hostId: roomInfo?.hostId, targetId: id, players, status: roomInfo?.status })
-  const kickPlayerInfo = kickTarget ? players.find(p => p.id === kickTarget) : null
-  function confirmKick() {
-    const code = roomCode || roomInfo?.code
-    const target = kickTarget
-    setKickTarget(null)
-    if (!target || !code) return
-    if (!emitSocket('kick_player', { roomCode: code, targetId: target })) setError('Koneksi ke server terputus. Tunggu tersambung sebelum mengeluarkan pemain.')
-  }
-
+  // Kick hanya tersedia di Room (LobbyPage). Halaman Result tidak punya tombol Kick.
   return (
     // Halaman dibagi dua: konten Result yang bisa di-scroll vertikal, dan area tombol navigasi yang selalu terlihat (sticky di bawah).
     <div style={{ height:'100dvh', background:C.bg, display:'flex', flexDirection:'column' }}>
@@ -107,12 +95,6 @@ export default function ResultPage() {
                 <div style={{ textAlign:'right' }}>
                   <div style={{ fontSize:16, fontWeight:700, color:PRIZE_COLOR[i] }}>{PRIZE[i]}</div>
                   <div style={{ fontSize:11, color:C.muted }}>Juara {i+1}</div>
-                  {showKick(r.id) && (
-                    <button
-                      onClick={() => setKickTarget(r.id)}
-                      style={{ marginTop:4, padding:'2px 8px', fontSize:11, fontWeight:600, borderRadius:6, background:'transparent', color:C.accent, border:`1px solid ${C.accent}`, cursor:'pointer' }}
-                    >Kick</button>
-                  )}
                 </div>
               </div>
             )
@@ -159,20 +141,6 @@ export default function ResultPage() {
           </div>
         </div>
       </div>
-
-      {kickTarget && (
-        <Modal
-          testId="kick-confirm"
-          title="Kick pemain?"
-          onEscape={() => setKickTarget(null)}
-          actions={[
-            { label: 'Batal', onClick: () => setKickTarget(null) },
-            { label: 'Kick', onClick: confirmKick, primary: true },
-          ]}
-        >
-          {kickConfirmText(nameOf(kickTarget || ''), kickPlayerInfo ? kickPlayerInfo.inRoom === false : true)}
-        </Modal>
-      )}
 
       {restrictedModalOpen && (
         <Modal

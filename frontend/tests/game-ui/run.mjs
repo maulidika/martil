@@ -51,11 +51,11 @@ t('daftar Combo Detector boleh tumbuh ke atas tetapi tidak menimpa kursi kiri', 
   }
 })
 
-t('posisi kursi proporsional: 1 lawan = atas; 2 = kiri/kanan; 3 = kiri/atas/kanan', () => {
+t('posisi kursi proporsional (berlawanan arah jarum jam): 1 lawan = atas; 2 = kanan/kiri; 3 = kanan/atas/kiri', () => {
   assert.deepEqual(seatSides(0), []); assert.deepEqual(seatSides(1), ['top'])
-  assert.deepEqual(seatSides(2), ['left', 'right']); assert.deepEqual(seatSides(3), ['left', 'top', 'right'])
+  assert.deepEqual(seatSides(2), ['right', 'left']); assert.deepEqual(seatSides(3), ['right', 'top', 'left'])
 })
-t('urutan duduk: lawan yang bermain setelah saya ada di kiri, lalu atas, lalu kanan', () => {
+t('urutan duduk: lawan yang bermain setelah saya didahulukan (seat pertama), lalu berikutnya, lalu yang terakhir', () => {
   const opp = [{ id: 'a' }, { id: 'c' }, { id: 'd' }]                // urutan asli tanpa saya
   assert.deepEqual(orderOpponents(opp, ['a', 'me', 'c', 'd'], 'me').map(o => o.id), ['c', 'd', 'a'])
   assert.deepEqual(orderOpponents(opp, ['me', 'a', 'c', 'd'], 'me').map(o => o.id), ['a', 'c', 'd'])
@@ -66,6 +66,32 @@ t('urutan duduk: data anggota room tidak cocok / kosong → urutan asli (tidak m
   assert.deepEqual(orderOpponents(opp, [], 'me'), opp)
   assert.deepEqual(orderOpponents(opp, ['a', 'c', 'd'], 'me'), opp)             // saya tidak ada di daftar
   assert.deepEqual(orderOpponents(opp, ['a', 'me', 'x', 'd'], 'me'), opp)       // peserta tidak sama
+})
+// Where each player sits for `me`, given the Room's join order. Sides come from seatSides, order from orderOpponents.
+const seatMap = (players, me) => {
+  const opp = players.filter(id => id !== me).map(id => ({ id }))
+  const ordered = orderOpponents(opp, players, me), sides = seatSides(ordered.length)
+  return Object.fromEntries(ordered.map((o, i) => [sides[i], o.id]))
+}
+t('contoh Host: P1 bawah, P2 kanan, P3 atas, P4 kiri (berlawanan arah jarum jam)', () => {
+  assert.deepEqual(seatMap(['P1', 'P2', 'P3', 'P4'], 'P1'), { right: 'P2', top: 'P3', left: 'P4' })
+})
+t('setiap pemain selalu di bawah menurut sudut pandangnya sendiri; yang berikutnya di kanan, lalu atas, lalu kiri', () => {
+  const players = ['P1', 'P2', 'P3', 'P4']
+  assert.deepEqual(seatMap(players, 'P2'), { right: 'P3', top: 'P4', left: 'P1' })
+  assert.deepEqual(seatMap(players, 'P3'), { right: 'P4', top: 'P1', left: 'P2' })
+  assert.deepEqual(seatMap(players, 'P4'), { right: 'P1', top: 'P2', left: 'P3' })
+})
+t('posisi mengikuti URUTAN BERGABUNG, bukan isi/urutan abjad ID', () => {
+  const ids = ['zzz9', 'mmm5', 'aaa1', 'kkk3']                       // urutan bergabung; ID sengaja tidak terurut
+  assert.deepEqual(seatMap(ids, 'zzz9'), { right: 'mmm5', top: 'aaa1', left: 'kkk3' })
+  assert.deepEqual(seatMap(ids, 'aaa1'), { right: 'kkk3', top: 'zzz9', left: 'mmm5' })
+  assert.deepEqual(seatMap([...ids].reverse(), 'zzz9'), { right: 'kkk3', top: 'aaa1', left: 'mmm5' })   // urutan bergabung berbeda → posisi berbeda
+})
+t('urutan giliran/ID tidak diubah oleh tata letak: orderOpponents hanya memutar, tidak mengacak', () => {
+  const opp = [{ id: 'P2' }, { id: 'P3' }, { id: 'P4' }]
+  const out = orderOpponents(opp, ['P1', 'P2', 'P3', 'P4'], 'P1')
+  assert.deepEqual(out.map(o => o.id), ['P2', 'P3', 'P4']); assert.deepEqual(opp.map(o => o.id), ['P2', 'P3', 'P4'])
 })
 t('cincin timer: 30 dtk = 100%, 15 dtk = 50%, 0 = 0%, tidak keluar rentang', () => {
   assert.equal(turnRingPct(30), 100); assert.equal(turnRingPct(15), 50); assert.equal(turnRingPct(0), 0)
