@@ -1,0 +1,287 @@
+'use strict';
+/**
+ * Configuration hygiene for JWT_SECRET (real src/auth/jwt.js; only `jsonwebtoken` is stubbed when it is not installed).
+ *   npm run test:config      (from the backend folder)
+ *
+ * Covered:
+ *   - resolveSecret (pure): NODE_ENV=production rejects missing / empty / whitespace-only / built-in dev value;
+ *     'Production' and ' PRODUCTION ' count as production; any other NODE_ENV (or unset) falls back to the dev secret
+ *   - the pure function prints nothing, never throws a message containing the secret value, and honors the env it is given
+ *   - real process boot (child processes): production without a secret exits with code 1 and ONE short line
+ *     (no stack trace); development without a secret starts with exactly ONE warning; the secret value is never printed
+ *   - the warning appears once per process, not per sign/verify call or per require
+ *   - signToken / verifyToken keep their behavior (secret + 7d expiry; real library round trip when installed)
+ *   - server.js calls dotenv.config() BEFORE it requires modules that load jwt.js (.env must be read first)
+ *   - backend/.env.example: placeholders only, JWT_SECRET left empty (an unedited copy can never become a real secret),
+ *     and .gitignore keeps it trackable
+ * NOT covered here: a real `npm start` boot with express/socket.io/dotenv installed (see the README manual check).
+ */
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const Module = require('module');
+const { spawnSync } = require('node:child_process');
+
+const BACKEND = path.join(__dirname, '..');
+const SRC = path.join(BACKEND, 'src');
+const JWT_PATH = path.join(SRC, 'auth/jwt.js');
+const DEV = 'martil-dev-secret'; // the built-in fallback as written in jwt.js (a failing test here is a tripwire)
+const MARK = 'Zq9-test-only-value-7f3a1c'; // unusual test value: must never appear in any output
+
+// ── in-process load of the real jwt.js (jsonwebtoken stubbed only when it is not installed) ──────────────
+let realLib = null;
+try { realLib = require('jsonwebtoken'); } catch { /* not installed (e.g. sandbox) */ }
+const libCalls = [];
+if (!realLib) {
+  const origLoad = Module._load;
+  Module._load = function (request, ...rest) {
+    if (request === 'jsonwebtoken') {
+      return {
+        sign: (payload, secret, opts) => { libCalls.push({ fn: 'sign', payload, secret, opts }); return 'tok'; },
+        verify: (token, secret) => { libCalls.push({ fn: 'verify', token, secret }); return { id: 'x' }; },
+      };
+    }
+    return origLoad.call(this, request, ...rest);
+  };
+}
+const IN_PROC_SECRET = 'inproc-' + MARK;
+delete process.env.NODE_ENV;
+process.env.JWT_SECRET = IN_PROC_SECRET;
+const jwtMod = require(JWT_PATH);
+const { resolveSecret, ConfigError } = jwtMod;
+
+// ── helpers ──────────────────────────────────────────────────────────────────────────────────────────
+function captureOutput(fn) {
+  const out = [];
+  const saved = { log: console.log, info: console.info, warn: console.warn, error: console.error };
+  for (const k of Object.keys(saved)) console[k] = (...a) => out.push(a.join(' '));
+  try { fn(); } finally { Object.assign(console, saved); }
+  return out;
+}
+function throws(env) {
+  try { resolveSecret(env); } catch (e) { return e; }
+  return null;
+}
+// Boot jwt.js in a fresh Node process (jsonwebtoken always stubbed there) with a fully controlled env.
+function boot(envOverrides, body = '') {
+  const env = { ...process.env };
+  delete env.NODE_ENV; delete env.JWT_SECRET;
+  Object.assign(env, envOverrides);
+  const code = `
+    const Module = require('module'); const o = Module._load;
+    Module._load = function (r, ...a) { if (r === 'jsonwebtoken') return { sign: () => 'tok', verify: () => ({}) }; return o.call(this, r, ...a); };
+    const j = require(${JSON.stringify(JWT_PATH)});
+    console.log('LOADED');
+    ${body}`;
+  const r = spawnSync(process.execPath, ['-e', code], { env, encoding: 'utf8' });
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr, all: `${r.stdout}\n${r.stderr}` };
+}
+const lines = (s) => s.split('\n').filter((l) => l.trim() !== '');
+function parseDotenv(text) { // tiny stand-in for dotenv: KEY=VALUE lines, '#' comments ignored
+  const env = {};
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const i = line.indexOf('=');
+    if (i > 0) env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return env;
+}
+
+const tests = [];
+const test = (name, fn) => tests.push({ name, fn });
+const skip = (name, reason) => tests.push({ name, skip: reason });
+
+// ── resolveSecret: production ─────────────────────────────────────────────────────────────────────────
+test('production: JWT_SECRET tidak ada, kosong, atau hanya spasi → ConfigError', () => {
+  for (const v of [undefined, '', '   ', '\t\n', null, 123]) {
+    const e = throws({ NODE_ENV: 'production', JWT_SECRET: v });
+    assert.ok(e instanceof ConfigError, `harus ditolak untuk JWT_SECRET=${JSON.stringify(v)}`);
+    assert.match(e.message, /JWT_SECRET is required when NODE_ENV=production/);
+  }
+});
+
+test('production: nilai bawaan development ditolak, pesan tidak memuat nilainya', () => {
+  for (const v of [DEV, `  ${DEV}  `]) {
+    const e = throws({ NODE_ENV: 'production', JWT_SECRET: v });
+    assert.ok(e instanceof ConfigError);
+    assert.ok(!e.message.includes(DEV), 'pesan tidak boleh memuat nilai bawaan');
+  }
+});
+
+test('production: "Production" dan " PRODUCTION " juga dianggap production', () => {
+  for (const n of ['Production', ' PRODUCTION ', 'production']) {
+    assert.ok(throws({ NODE_ENV: n }) instanceof ConfigError, `NODE_ENV=${JSON.stringify(n)}`);
+  }
+});
+
+test('production: secret yang valid dipakai apa adanya', () => {
+  assert.deepEqual(resolveSecret({ NODE_ENV: 'production', JWT_SECRET: MARK }), { secret: MARK, usedFallback: false });
+});
+
+test('production: pesan error tidak pernah memuat nilai JWT_SECRET yang diberikan', () => {
+  for (const v of [undefined, '', '   ', DEV]) {
+    const e = throws({ NODE_ENV: 'production', JWT_SECRET: v });
+    assert.ok(e && !e.message.includes(MARK));
+  }
+  // a value containing the marker plus whitespace padding of the dev value still never leaks
+  const e = throws({ NODE_ENV: 'production', JWT_SECRET: DEV });
+  assert.ok(e && !/martil-dev/.test(e.message));
+});
+
+// ── resolveSecret: non-production ────────────────────────────────────────────────────────────────────
+test('bukan production (unset, development, test, staging): tanpa secret → nilai bawaan + usedFallback', () => {
+  for (const n of [undefined, '', 'development', 'test', 'staging']) {
+    assert.deepEqual(resolveSecret({ NODE_ENV: n }), { secret: DEV, usedFallback: true }, `NODE_ENV=${JSON.stringify(n)}`);
+  }
+});
+
+test('bukan production: JWT_SECRET kosong atau hanya spasi dianggap tidak diisi', () => {
+  for (const v of ['', '   ', '\t']) {
+    assert.deepEqual(resolveSecret({ JWT_SECRET: v }), { secret: DEV, usedFallback: true });
+  }
+});
+
+test('bukan production: JWT_SECRET yang diisi dipakai apa adanya (tanpa trim) dan tidak dianggap fallback', () => {
+  assert.deepEqual(resolveSecret({ JWT_SECRET: MARK }), { secret: MARK, usedFallback: false });
+  assert.deepEqual(resolveSecret({ JWT_SECRET: ` ${MARK} ` }), { secret: ` ${MARK} `, usedFallback: false });
+});
+
+test('resolveSecret murni: tidak mencetak apa pun, memakai env yang diberikan (bukan process.env)', () => {
+  const before = process.env.JWT_SECRET;
+  const out = captureOutput(() => {
+    resolveSecret({});
+    resolveSecret({ JWT_SECRET: MARK });
+    throws({ NODE_ENV: 'production' });
+  });
+  assert.deepEqual(out, []);
+  assert.equal(resolveSecret({}).secret, DEV, 'env kosong yang diberikan tidak boleh jatuh ke process.env');
+  assert.equal(process.env.JWT_SECRET, before);
+  assert.equal(resolveSecret().secret, IN_PROC_SECRET, 'tanpa argumen memakai process.env');
+});
+
+// ── real boot in child processes ──────────────────────────────────────────────────────────────────────
+test('boot: production tanpa JWT_SECRET → exit code 1, SATU baris pendek, tanpa stack trace, modul tidak termuat', () => {
+  const r = boot({ NODE_ENV: 'production' });
+  assert.equal(r.status, 1);
+  assert.ok(!r.stdout.includes('LOADED'), 'server tidak boleh lanjut berjalan');
+  const l = lines(r.stderr);
+  assert.equal(l.length, 1, `stderr harus satu baris, dapat:\n${r.stderr}`);
+  assert.match(l[0], /^\[config\] FATAL: JWT_SECRET is required when NODE_ENV=production/);
+  assert.ok(l[0].length < 200, 'pesan harus pendek');
+  assert.ok(!/\n\s+at /.test(r.stderr) && !/node:internal|ConfigError|\.js:\d+/.test(r.stderr), 'tidak boleh ada stack trace');
+});
+
+test('boot: production dengan JWT_SECRET kosong / spasi / "Production" juga exit code 1', () => {
+  for (const env of [{ NODE_ENV: 'production', JWT_SECRET: '' }, { NODE_ENV: 'production', JWT_SECRET: '   ' }, { NODE_ENV: 'Production' }]) {
+    const r = boot(env);
+    assert.equal(r.status, 1, JSON.stringify(env));
+    assert.equal(lines(r.stderr).length, 1);
+  }
+});
+
+test('boot: production dengan nilai bawaan dev → exit code 1 dan nilainya tidak dicetak', () => {
+  const r = boot({ NODE_ENV: 'production', JWT_SECRET: DEV });
+  assert.equal(r.status, 1);
+  assert.equal(lines(r.stderr).length, 1);
+  assert.ok(!r.all.includes(DEV));
+});
+
+test('boot: production dengan secret valid → berjalan, tanpa output tambahan, secret tidak dicetak', () => {
+  const r = boot({ NODE_ENV: 'production', JWT_SECRET: MARK });
+  assert.equal(r.status, 0);
+  assert.ok(r.stdout.includes('LOADED'));
+  assert.equal(r.stderr, '');
+  assert.ok(!r.all.includes(MARK));
+});
+
+test('boot: NODE_ENV tidak diset dan tanpa secret → berjalan dengan tepat SATU warning, tanpa nilai rahasia', () => {
+  for (const env of [{}, { NODE_ENV: 'development' }, { JWT_SECRET: '' }]) {
+    const r = boot(env);
+    assert.equal(r.status, 0, JSON.stringify(env));
+    assert.ok(r.stdout.includes('LOADED'));
+    const l = lines(r.stderr);
+    assert.equal(l.length, 1, `harus satu warning, dapat:\n${r.stderr}`);
+    assert.match(l[0], /^\[config\] WARNING: JWT_SECRET is not set/);
+    assert.ok(!r.all.includes(DEV), 'warning tidak boleh memuat nilai bawaan');
+  }
+});
+
+test('boot: bukan production dengan secret → tanpa warning dan secret tidak dicetak', () => {
+  const r = boot({ JWT_SECRET: MARK });
+  assert.equal(r.status, 0);
+  assert.equal(r.stderr, '');
+  assert.ok(!r.all.includes(MARK) && !r.all.includes(DEV));
+});
+
+test('boot: warning hanya sekali per proses (bukan per signToken/verifyToken/require)', () => {
+  const r = boot({}, `
+    j.signToken({ a: 1 }); j.signToken({ a: 2 }); j.verifyToken('x'); j.verifyToken('y');
+    require(${JSON.stringify(JWT_PATH)}); require(${JSON.stringify(JWT_PATH)});`);
+  assert.equal(r.status, 0);
+  assert.equal(lines(r.stderr).filter((x) => x.includes('WARNING')).length, 1);
+});
+
+// ── sign / verify unchanged ───────────────────────────────────────────────────────────────────────────
+if (!realLib) {
+  test('signToken/verifyToken: memakai secret hasil resolve dan masa berlaku 7d (jsonwebtoken di-stub)', () => {
+    libCalls.length = 0;
+    jwtMod.signToken({ id: 'u1' });
+    jwtMod.verifyToken('abc');
+    assert.equal(libCalls[0].fn, 'sign');
+    assert.equal(libCalls[0].secret, IN_PROC_SECRET);
+    assert.deepEqual(libCalls[0].opts, { expiresIn: '7d' });
+    assert.deepEqual(libCalls[0].payload, { id: 'u1' });
+    assert.equal(libCalls[1].fn, 'verify');
+    assert.equal(libCalls[1].secret, IN_PROC_SECRET);
+  });
+  skip('signToken/verifyToken: round trip dengan jsonwebtoken ASLI + token secret lain ditolak', 'jsonwebtoken belum terpasang (jalankan npm install di backend)');
+} else {
+  test('signToken/verifyToken: round trip dengan jsonwebtoken ASLI, masa berlaku 7 hari, token secret lain ditolak', () => {
+    const t = jwtMod.signToken({ id: 'u1', username: 'andi' });
+    const p = jwtMod.verifyToken(t);
+    assert.equal(p.id, 'u1');
+    assert.equal(p.exp - p.iat, 7 * 24 * 3600);
+    const foreign = realLib.sign({ id: 'u1' }, 'another-secret-' + MARK);
+    assert.throws(() => jwtMod.verifyToken(foreign));
+  });
+}
+
+// ── static guards ─────────────────────────────────────────────────────────────────────────────────────
+test('server.js: dotenv.config() dipanggil SEBELUM require modul yang memuat jwt.js (.env terbaca lebih dulu)', () => {
+  const src = fs.readFileSync(path.join(SRC, 'server.js'), 'utf8');
+  const iEnv = src.indexOf('dotenv.config()');
+  const iRoutes = src.indexOf("require('./auth/routes')");
+  const iSocket = src.indexOf("require('./socket/socketHandler')");
+  assert.ok(iEnv >= 0 && iRoutes >= 0 && iSocket >= 0, 'pemanggilan tidak ditemukan');
+  assert.ok(iEnv < iRoutes, 'dotenv.config() harus sebelum require auth/routes');
+  assert.ok(iEnv < iSocket, 'dotenv.config() harus sebelum require socketHandler');
+});
+
+test('.env.example: hanya placeholder; JWT_SECRET kosong; salinan yang belum diisi tidak lolos production', () => {
+  const file = path.join(BACKEND, '.env.example');
+  assert.ok(fs.existsSync(file), 'backend/.env.example harus ada');
+  const env = parseDotenv(fs.readFileSync(file, 'utf8'));
+  assert.deepEqual(Object.keys(env).sort(), ['CLIENT_URL', 'JWT_SECRET', 'PORT']);
+  assert.equal(env.JWT_SECRET, '', 'JWT_SECRET di contoh harus kosong (bukan placeholder yang bisa terpakai sebagai secret)');
+  assert.ok(throws({ ...env, NODE_ENV: 'production' }) instanceof ConfigError, 'salinan tanpa diisi harus gagal di production');
+  assert.equal(resolveSecret(env).usedFallback, true, 'salinan tanpa diisi di development memakai fallback + warning');
+});
+
+test('.gitignore: .env.* diabaikan tetapi .env.example tetap bisa di-commit (urutan aturan benar)', () => {
+  const gi = fs.readFileSync(path.join(BACKEND, '../.gitignore'), 'utf8').split(/\r?\n/).map((l) => l.trim());
+  const iIgnore = gi.indexOf('.env.*');
+  const iKeep = gi.indexOf('!.env.example');
+  assert.ok(gi.includes('.env'));
+  assert.ok(iIgnore >= 0 && iKeep > iIgnore, '!.env.example harus ada SETELAH .env.*');
+});
+
+// ── runner ────────────────────────────────────────────────────────────────────────────────────────────
+let failed = 0, skipped = 0, passed = 0;
+for (const t of tests) {
+  if (t.skip) { skipped += 1; console.log(`  SKIP  ${t.name} (${t.skip})`); continue; }
+  try { t.fn(); passed += 1; console.log(`  PASS  ${t.name}`); }
+  catch (e) { failed += 1; console.log(`  FAIL  ${t.name}\n        ${String(e.stack || e.message).split('\n').slice(0, 6).join('\n        ')}`); }
+}
+console.log(`\n${passed}/${passed + failed} lulus${skipped ? `, ${skipped} dilewati` : ''}`);
+process.exit(failed ? 1 : 0);
