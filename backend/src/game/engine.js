@@ -7,6 +7,16 @@ const { validateCardIds } = require('./cardIds');
 
 const TURN_TIMEOUT_MS = 30_000;
 
+// Rally debug logging: OFF by default. Enable with MARTIL_DEBUG=1 (or "true"). Read at call time (not at load)
+// so it can be toggled without reloading the module; `build` runs only when enabled.
+function debugEnabled() {
+  const v = String(process.env.MARTIL_DEBUG || '').trim().toLowerCase();
+  return v === '1' || v === 'true';
+}
+function rallyDebug(label, build) {
+  if (debugEnabled()) console.log(`[rally-debug] ${label}`, build());
+}
+
 class GameEngine {
   /**
    * Create initial game state.
@@ -68,13 +78,13 @@ class GameEngine {
     const newTable  = [...state.table, { playerId, combo }];
     const next      = GameEngine._nextActive(state.playerIds, playerId, passedSet);
     const rallyId   = state.table.length === 0 ? 'reset' : `${state.table.length}-${state.lastPlayerId || 'none'}`;
-    console.log('[rally-debug] processPlay', {
+    rallyDebug('processPlay', () => ({
       currentPlayer: playerId,
       lastPlayer: state.lastPlayerId,
       passedPlayers: state.passedPlayers || [],
       nextPlayer: next || playerId,
       rallyId,
-    });
+    }));
 
     if (!next) {
       const resetState = {
@@ -128,13 +138,13 @@ class GameEngine {
 
     if (activePlayers.length === 1) {
       const remainingPlayer = activePlayers[0];
-      console.log('[rally-debug] processSkip', {
+      rallyDebug('processSkip', () => ({
         currentPlayer: playerId,
         lastPlayer: state.lastPlayerId,
         passedPlayers: Array.from(passedSet),
         nextPlayer: remainingPlayer,
         rallyId,
-      });
+      }));
       const newState = {
         ...state,
         table: [],
@@ -155,13 +165,13 @@ class GameEngine {
       currentTurn: next,
       turnStartedAt: Date.now(),
     };
-    console.log('[rally-debug] processSkip', {
+    rallyDebug('processSkip', () => ({
       currentPlayer: playerId,
       lastPlayer: state.lastPlayerId,
       passedPlayers: Array.from(passedSet),
       nextPlayer: next,
       rallyId,
-    });
+    }));
     return ok(newState, { type: 'player_skipped', playerId, nextTurn: next });
   }
 

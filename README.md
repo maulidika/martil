@@ -93,7 +93,7 @@ martil-main/
 │
 ├── backend/
 │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config
+│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config, test:debuglog
 │   ├── .env.example             ← contoh konfigurasi (hanya placeholder; salin menjadi .env)
 │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
 │   ├── src/
@@ -115,7 +115,7 @@ martil-main/
 │   └── tests/
 │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
 │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js
+│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js, debug-log.sim.js
 │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
 │
 └── frontend/
@@ -148,6 +148,7 @@ Isi `.env.example` (nilai rahasia sengaja **kosong**, jadi salinan yang belum di
 
 ```env
 # NODE_ENV=production
+# MARTIL_DEBUG=1
 PORT=3001
 CLIENT_URL=http://localhost:5173
 JWT_SECRET=
@@ -156,6 +157,7 @@ JWT_SECRET=
 | Variabel | Dipakai di | Default bila kosong | Keterangan |
 |---|---|---|---|
 | `NODE_ENV` | backend | tidak diset = development | Hanya dibaca oleh `auth/jwt.js`: `production` (huruf besar/kecil dan spasi di sekitarnya diabaikan) mewajibkan `JWT_SECRET`. Nilai lain atau tidak diset diperlakukan sebagai development |
+| `MARTIL_DEBUG` | backend | mati | `1` atau `true` menyalakan log `[rally-debug]` di engine (lihat bagian Log). Nilai lain, termasuk `0`/`false`/kosong, tetap mati |
 | `PORT` | backend | `3001` | Port server HTTP + Socket.IO |
 | `CLIENT_URL` | backend | `http://localhost:5173` | **Satu** origin yang diizinkan CORS (REST dan Socket.IO) |
 | `JWT_SECRET` | backend | development: nilai bawaan di `auth/jwt.js` + satu peringatan saat start | **Wajib di production.** Dengan `NODE_ENV=production`, server langsung berhenti (exit code 1, satu baris pesan, tanpa stack trace) bila `JWT_SECRET` kosong, hanya spasi, atau sama dengan nilai bawaan development. Kode tidak memaksa panjang minimum; disarankan nilai acak minimal 32 karakter, mis. `node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"` |
@@ -366,7 +368,7 @@ Di klien, `ConnectionOverlay` menampilkan "Menghubungkan kembali..." dan berubah
 - *(Tidak ada tombol Kick di halaman Result lagi; bagian ini hanya menjelaskan apa yang masih diterima server.)* Target masih di **Result** → dihapus dari kursi Room tetapi tetap melihat hasil set, dengan pembatasan (`kicked_from_result`): Back to Room ditolak (`KICKED_FROM_ROOM`) dan ia tidak bisa membuat/bergabung Room sebelum kembali ke Menu Utama (`leave_room`). Pembatasan bertahan setelah refresh/reconnect dan berakhir dengan timeout disconnect yang sama seperti pemain biasa (60 detik).
 
 ### Log
-Backend mencetak log berawalan `[MARTIL ...]` (mis. `SOCKET_CONNECTED`, `SESSION_RESTORED`, `PLAYER_DISCONNECTED`, `AUTO_SKIP`, `SET_OVER`, `LEAVE_ROOM_REQUEST`, `PLAYER_KICKED`). `engine.js` juga mencetak `[rally-debug]` pada setiap Main/Skip. Di console browser: `SOCKET_CONNECTED/DISCONNECTED`, `SESSION_RESTORED`, `SESSION_NONE`, `SESSION_REPLACED`, `SYNC_FAILED`, `SET_OVER_RECEIVED`, `ROOM_LEFT_CONFIRMED`.
+Backend mencetak log berawalan `[MARTIL ...]` (mis. `SOCKET_CONNECTED`, `SESSION_RESTORED`, `PLAYER_DISCONNECTED`, `AUTO_SKIP`, `SET_OVER`, `LEAVE_ROOM_REQUEST`, `PLAYER_KICKED`). `engine.js` mencetak `[rally-debug]` (pemain saat ini, pemain berikutnya, daftar yang sudah skip, `rallyId`) pada setiap Main/Skip yang diterima, **hanya bila `MARTIL_DEBUG=1` atau `true`**; secara default mati. Menyalakan di PowerShell: `$env:MARTIL_DEBUG = "1"` sebelum `npm run dev`; di bash: `MARTIL_DEBUG=1 npm run dev`; atau tulis `MARTIL_DEBUG=1` di `backend/.env`. Di console browser: `SOCKET_CONNECTED/DISCONNECTED`, `SESSION_RESTORED`, `SESSION_NONE`, `SESSION_REPLACED`, `SYNC_FAILED`, `SET_OVER_RECEIVED`, `ROOM_LEFT_CONFIRMED`.
 
 ---
 
@@ -387,6 +389,7 @@ npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepa
 npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
 npm run test:profiles  # profil publik: nama di setiap state Room, daftar putih field, pembersihan username, pembekuan nama di hasil set
 npm run test:hostkeep  # Host dipertahankan selama masa tunggu 60 dtk, dikembalikan bila kursi dipertahankan, alasan di event host_changed
+npm run test:debuglog  # log [rally-debug] hanya aktif dengan MARTIL_DEBUG=1/true, isi log tidak berubah, hasil engine identik dengan/tanpa flag
 npm run test:config  # JWT_SECRET: fail-fast di production (exit 1, satu baris), satu warning di development, secret tidak pernah dicetak, urutan dotenv, .env.example
 npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
 npm test             # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
