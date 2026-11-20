@@ -1,0 +1,91 @@
+diff --git a/README.md b/README.md
+index 4aa9c80..5f48ef1 100644
+--- a/README.md
++++ b/README.md
+@@ -93,7 +93,7 @@ martil-main/
+ │
+ ├── backend/
+ │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
+-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config, test:debuglog
++│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config, test:debuglog, test:db
+ │   ├── .env.example             ← contoh konfigurasi (hanya placeholder; salin menjadi .env)
+ │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
+ │   ├── src/
+@@ -101,7 +101,7 @@ martil-main/
+ │   │   ├── auth/
+ │   │   │   ├── jwt.js           ← sign/verify JWT + pemilihan secret (server menolak start di production bila JWT_SECRET kosong)
+ │   │   │   └── routes.js        ← POST /api/auth/register, /login; GET /api/auth/me
+-│   │   ├── db/database.js       ← koneksi SQLite + pembuatan tabel (CREATE TABLE IF NOT EXISTS)
++│   │   ├── db/database.js       ← koneksi SQLite, migrasi skema berversi (PRAGMA user_version), penutupan Room basi saat start
+ │   │   ├── game/
+ │   │   │   ├── deck.js          ← kartu, urutan rank/suit, shuffle, deal
+ │   │   │   ├── validator.js     ← deteksi dan perbandingan kombinasi
+@@ -115,7 +115,7 @@ martil-main/
+ │   └── tests/
+ │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
+ │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
+-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js, debug-log.sim.js
++│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js, debug-log.sim.js, db-schema.sim.js
+ │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
+ │
+ └── frontend/
+@@ -169,6 +169,8 @@ Catatan:
+ - `PORT` dan `CLIENT_URL` yang kosong masih jatuh ke nilai localhost, termasuk di production (belum ada fail-fast untuk keduanya).
+ - Request REST (`/api/...`) dari frontend lewat proxy Vite ke `http://localhost:3001` (tertulis di `frontend/vite.config.js`); Socket.IO tidak lewat proxy, melainkan langsung ke `VITE_SERVER_URL`.
+ - Lokasi database tetap: `backend/data/martil.db` (otomatis dibuat). File ini berisi hash password pemain; jangan dibagikan atau di-commit.
++- **Skema database berversi** (`PRAGMA user_version`, saat ini `1`). Saat server start (`bootDatabase()` di `server.js`, sebelum `listen`): (1) migrasi yang belum berjalan diterapkan otomatis, masing-masing dalam satu transaksi; (2) Room yang masih berstatus `waiting`/`playing` di database ditandai `closed`, karena state Room hidup di memori dan sudah hilang saat server berhenti (log `DB_STALE_ROOMS_CLOSED` dengan jumlahnya, hanya bila ada). Room `done` (set selesai) dan kolom `sets.ended_at` tidak diubah: perlakuan set yang tidak selesai belum diputuskan.
++- Database lama dari sebelum versi ini (`user_version` 0) otomatis naik ke versi 1 tanpa kehilangan data. **Cadangkan `backend/data/` sebelum menjalankan versi ini pertama kali.** Bila `martil.db` berasal dari server yang lebih baru (versi lebih tinggi dari yang didukung kode), server berhenti dengan exit code 1 dan satu baris `[db] FATAL: ...`, dan file tidak diubah.
+ 
+ ### Data lokal dan rahasia tidak boleh ikut terunggah
+ `.gitignore` mengecualikan `.env` dan `.env.*` (kecuali `.env.example`), folder `backend/data/`, serta berkas `*.db`, `*.db-wal`, `*.db-shm`, `*.sqlite`, `*.sqlite3`.
+@@ -389,6 +391,7 @@ npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepa
+ npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
+ npm run test:profiles  # profil publik: nama di setiap state Room, daftar putih field, pembersihan username, pembekuan nama di hasil set
+ npm run test:hostkeep  # Host dipertahankan selama masa tunggu 60 dtk, dikembalikan bila kursi dipertahankan, alasan di event host_changed
++npm run test:db  # skema DB berversi, migrasi (naik, gagal, versi lebih baru), penutupan Room basi, boot fail-fast; memakai SQLite asli di :memory:/folder sementara
+ npm run test:debuglog  # log [rally-debug] hanya aktif dengan MARTIL_DEBUG=1/true, isi log tidak berubah, hasil engine identik dengan/tanpa flag
+ npm run test:config  # JWT_SECRET: fail-fast di production (exit 1, satu baris), satu warning di development, secret tidak pernah dicetak, urutan dotenv, .env.example
+ npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
+@@ -429,7 +432,23 @@ Remove-Item Env:NODE_ENV, Env:JWT_SECRET -ErrorAction SilentlyContinue
+ node backend/src/server.js      # diharapkan: satu baris "[config] WARNING: ...", lalu "Martil server running on :3001" (hentikan dengan Ctrl+C)
+ ```
+ 
+-Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otomatis: lapisan database, transport Socket.IO asli, boot `server.js` yang sebenarnya (dua langkah manual di atas), dan perilaku React di browser sungguhan di luar uji render/e2e opsional di atas.
++`test:db` memakai `node:sqlite` asli (`:memory:` dan folder sementara) dan tidak pernah menyentuh `backend/data/martil.db`.
++
++**Cek manual database milik Anda (PowerShell, dari folder root proyek).** Cadangkan dulu, jalankan server sekali, lalu baca hasilnya:
++
++```powershell
++Copy-Item backend\data\martil.db backend\data\martil.db.bak      # cadangan
++node backend/src/server.js                                         # lihat satu baris DB_STALE_ROOMS_CLOSED bila ada Room basi; hentikan dengan Ctrl+C
++@'
++const { DatabaseSync } = require('node:sqlite');
++const d = new DatabaseSync('backend/data/martil.db', { readOnly: true });
++console.log('user_version:', d.prepare('PRAGMA user_version').get().user_version);
++console.log(d.prepare('SELECT status, COUNT(*) AS n FROM rooms GROUP BY status').all());
++'@ | node -
++# diharapkan: user_version: 1 dan tidak ada lagi Room berstatus waiting/playing
++```
++
++Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otomatis: SQL di `roomManager.js` dan `auth/routes.js` terhadap database asli (di tes lain DB di-stub; skema, migrasi, dan pembersihan diuji oleh `test:db`), transport Socket.IO asli, boot `server.js` yang sebenarnya (dua langkah manual di atas), dan perilaku React di browser sungguhan di luar uji render/e2e opsional di atas.
+ 
+ ---
+ 
+@@ -440,7 +459,7 @@ Belum ada satu perintah `npm test` yang menjalankan semuanya. Belum teruji otoma
+ - **Wallet / saldo:** belum ada. Tidak ada saldo, riwayat transaksi, atau pembaruan saldo setelah set.
+ - **Tombol HINT dan AUTO:** placeholder, nonaktif.
+ - **Kolom `rooms.max_games`** di database belum punya `CHECK` constraint; batas 3/4/5 hanya dijaga di server (data yang ada saat ini hanya berisi 3, 4, atau 5).
+-- **Riwayat tersimpan:** tabel `rooms`, `sets`, `games`, `game_scores` hanya ditulis; belum ada fitur yang membacanya. Tabel `room_players` dibuat tetapi belum dipakai.
++- **Riwayat tersimpan:** tabel `rooms`, `sets`, `games`, `game_scores` hanya ditulis; belum ada fitur yang membacanya. Tabel `room_players` dibuat tetapi belum dipakai. Room yang tersisa `waiting`/`playing` dari proses sebelumnya ditutup saat start; `sets.ended_at` yang NULL (set terputus) dibiarkan apa adanya.
+ - **State Room/Game hanya di memori server:** hilang bila server restart; hanya mendukung satu proses.
+ - **Email** pada register diterima server tetapi tidak dikirim dan tidak dipakai UI.
+ - `ioredis` dan dependency `martil: file:..` tercantum di `package.json` tetapi tidak dipakai kode.
+@@ -487,7 +506,7 @@ Contoh Room 5K dari saldo 20.000: juara 1 menjadi 25.000, juara 2 23.000, juara
+ 
+ **Port sudah dipakai?** Ubah `PORT` di `backend/.env`, lalu sesuaikan **dua** tempat di frontend: target proxy `/api` di `frontend/vite.config.js` dan `VITE_SERVER_URL` (untuk Socket.IO).
+ 
+-**Error `node:sqlite` / database gagal dibuka?** Gunakan Node.js 22.x (versi yang diuji: v22.23.4; versi lain belum diuji). Folder `backend/data/` dibuat otomatis; pastikan backend punya izin tulis. Peringatan "ExperimentalWarning: SQLite" di console adalah normal.
++**Error `node:sqlite` / database gagal dibuka?** Gunakan Node.js 22.x (versi yang diuji: v22.23.4; versi lain belum diuji). Folder `backend/data/` dibuat otomatis; pastikan backend punya izin tulis. Peringatan "ExperimentalWarning: SQLite" di console adalah normal. Bila server berhenti dengan `[db] FATAL: database schema version N is newer than this server supports`, berarti `martil.db` dibuat oleh versi server yang lebih baru: jalankan versi server yang sesuai atau pakai file database lain (file tidak diubah).
+ 
+ **Koneksi Socket.IO gagal?** Pastikan `CLIENT_URL` di `backend/.env` sama persis dengan URL frontend (hanya satu origin yang diizinkan) dan `VITE_SERVER_URL` menunjuk ke backend.
+ 

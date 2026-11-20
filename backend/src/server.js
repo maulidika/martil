@@ -12,6 +12,9 @@ dotenv.config();
 
 const authRoutes = require('./auth/routes');
 const registerSocketHandlers = require('./socket/socketHandler');
+const { bootDatabase } = require('./db/database');
+
+bootDatabase(); // run schema migrations and close rooms left over from a previous run, before accepting connections
 
 const app = express();
 const server = http.createServer(app);
