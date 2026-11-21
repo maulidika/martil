@@ -5,7 +5,7 @@
  *
  *   npm run test:sim      (dari folder backend)
  *
- * Yang di-stub: JWT (token = JSON), database (no-op), uuid (crypto.randomUUID).
+ * Yang di-stub: JWT (token = JSON) dan uuid (crypto.randomUUID). Database: SQLite ASLI di memori dengan skema produksi (helpers/memdb.js).
  * Waktu disimulasikan dengan menggeser Date.now(), jadi tidak perlu menunggu 60 detik.
  * Skrip ini TIDAK menguji transport WebSocket asli maupun React — untuk itu gunakan
  * uji manual 4 tab (lihat README).
@@ -23,7 +23,8 @@ function stub(rel, exports) {
   require.cache[file] = { id: file, filename: file, loaded: true, exports };
 }
 stub('auth/jwt.js', { verifyToken: (t) => JSON.parse(t), signToken: () => '' });
-stub('db/database.js', { db: () => ({ prepare: () => ({ run() {}, get() {}, all() { return []; } }), exec() {} }) });
+const memdb = require('./helpers/memdb');
+stub('db/database.js', { db: () => memdb.handle() });
 const origLoad = Module._load;
 Module._load = function (request, ...rest) {
   if (request === 'uuid') return { v4: () => crypto.randomUUID() };
@@ -92,6 +93,7 @@ class Client {
 // ── Helper skenario ──────────────────────────────────────────────────────────
 let seq = 0;
 function setup() {
+  memdb.fresh();                                   // every scenario starts with an empty real database
   const io = new FakeIO();
   const handle = registerSocketHandlers(io, { sweepIntervalMs: 0 });
   return { io, handle };
@@ -355,7 +357,13 @@ test('join_room oleh anggota yang sudah ada diperlakukan sebagai resume (bukan A
 let failed = 0;
 for (const { name, fn } of tests) {
   offsetMs = 0;
-  try { fn(); realLog(`  PASS  ${name}`); }
+  memdb.takeErrors();
+  try {
+    fn();
+    const dbErrors = memdb.takeErrors();
+    if (dbErrors.length) throw new Error(`error SQL tertelan oleh server selama skenario:\n  ${dbErrors.join('\n  ')}`);
+    realLog(`  PASS  ${name}`);
+  }
   catch (e) { failed += 1; realLog(`  FAIL  ${name}\n        ${e.message.split('\n').join('\n        ')}`); }
 }
 console.info = realInfo;

@@ -1,0 +1,915 @@
+diff --git a/backend/package.json b/backend/package.json
+index 179956f..bd249e5 100644
+--- a/backend/package.json
++++ b/backend/package.json
+@@ -6,7 +6,8 @@
+   "scripts": {
+     "start": "node src/server.js",
+     "dev": "nodemon src/server.js",
+-    "test": "jest",
++    "test": "node ../scripts/run-tests.mjs --only backend",
++    "test:jest": "jest",
+     "test:sim": "node tests/reconnect.sim.js",
+     "test:combo": "node tests/combo.consistency.js",
+     "test:nav": "node tests/room-navigation.sim.js",
+@@ -21,7 +22,8 @@
+     "test:hostkeep": "node tests/host-retention.sim.js",
+     "test:config": "node tests/config-jwt.sim.js",
+     "test:debuglog": "node tests/debug-log.sim.js",
+-    "test:db": "node tests/db-schema.sim.js"
++    "test:db": "node tests/db-schema.sim.js",
++    "test:persistence": "node tests/db-persistence.sim.js"
+   },
+   "dependencies": {
+     "bcryptjs": "^3.0.3",
+diff --git a/backend/tests/db-persistence.sim.js b/backend/tests/db-persistence.sim.js
+new file mode 100644
+index 0000000..63db7fa
+--- /dev/null
++++ b/backend/tests/db-persistence.sim.js
+@@ -0,0 +1,225 @@
++'use strict';
++/**
++ * What the server really writes to the database while Rooms are played: the real socketHandler.js + roomManager.js run
++ * against a REAL in-memory SQLite with the production schema (helpers/memdb.js), with a fake Socket.IO.
++ *   npm run test:persistence      (from the backend folder)
++ *
++ * Covered (current behavior, nothing here changes game rules):
++ *   - create_room writes one `rooms` row (code, host, max_games 3/4/5, status 'waiting'); joining writes nothing
++ *   - start_game: status 'playing' + one `sets` row (ended_at NULL); rejected starts write nothing; a repeated start adds no 2nd set
++ *   - a finished set: status 'done', sets.ended_at filled, one `games` row per game (numbers 1..N, winner, win_type, ended_at),
++ *     four `game_scores` rows per game (distinct players, JSON remaining_cards), and per-player score sums equal the in-memory set scores
++ *   - a second set in the same Room: a second `sets` row, the first one keeps its ended_at, new games belong to the new set
++ *   - returning to the Room resets the status to 'waiting'; the last player leaving a Room marks it 'closed'
++ *   - closeStaleRooms (S8) applied to Rooms produced by the real code paths closes exactly the 'waiting'/'playing' ones
++ *   - (enforced by the runner) no SQL error is ever swallowed by the socket handlers during any scenario; the recorder that
++ *     enforces it is itself tested here (unit + a child process proving runTests fails a scenario with a swallowed SQL error)
++ */
++const fs = require('node:fs');
++const os = require('node:os');
++const path = require('node:path');
++const { spawnSync } = require('node:child_process');
++const { assert, rm, setup, newRoom, playSetToEnd, runTests, memdb } = require('./helpers/sim');
++
++const q = (sql, ...params) => memdb.handle().prepare(sql).all(...params).map((r) => ({ ...r }));
++const one = (sql, ...params) => q(sql, ...params)[0];
++const roomRow = (code) => one('SELECT * FROM rooms WHERE code = ?', code);
++const errCodes = (c) => c.all('error').map((m) => m.code);
++
++const tests = [];
++const test = (name, fn) => tests.push({ name, fn });
++
++test('create_room: satu baris rooms (kode, host, max_games bawaan 4, status waiting); bergabung tidak menulis apa pun', () => {
++  const { io } = setup();
++  const { users, code } = newRoom(io, 4);
++  const rows = q('SELECT * FROM rooms');
++  assert.equal(rows.length, 1);
++  const r = roomRow(code);
++  assert.equal(r.host_id, users[0]);
++  assert.equal(r.status, 'waiting');
++  assert.equal(r.max_games, 4);
++  assert.ok(r.id && r.created_at);
++  assert.equal(r.id, rm.getRoom(code).id, 'id baris DB sama dengan id Room di memori');
++  assert.equal(q('SELECT * FROM sets').length, 0);
++  assert.equal(q('SELECT * FROM games').length, 0);
++  assert.equal(q('SELECT * FROM room_players').length, 0, 'room_players belum dipakai server (tercatat sebagai perilaku saat ini)');
++});
++
++test('create_room dengan maxGames 3 dan 5: nilai tersimpan apa adanya', () => {
++  const { io } = setup();
++  const seen = [];
++  for (const n of [3, 5]) {
++    const c = io.connect(`host_${n}`);
++    c.emit('create_room', { maxGames: n });
++    seen.push(roomRow(c.last('room_created').code).max_games);
++  }
++  assert.deepEqual(seen, [3, 5]);
++});
++
++test('start_game: status playing + satu baris sets (ended_at NULL); belum ada games', () => {
++  const { io } = setup();
++  const { code } = newRoom(io, 4, { start: true });
++  const r = roomRow(code);
++  assert.equal(r.status, 'playing');
++  const sets = q('SELECT * FROM sets');
++  assert.equal(sets.length, 1);
++  assert.equal(sets[0].room_id, r.id);
++  assert.equal(sets[0].ended_at, null);
++  assert.ok(sets[0].started_at);
++  assert.equal(q('SELECT * FROM games').length, 0);
++});
++
++test('start_game ditolak (bukan Host / pemain kurang) dan start berulang: tidak menulis set tambahan', () => {
++  const { io } = setup();
++  const three = newRoom(io, 3);
++  three.clients[0].emit('start_game', { roomCode: three.code });          // only 3 players
++  assert.ok(errCodes(three.clients[0]).length > 0, 'start dengan 3 pemain harus ditolak');
++  assert.equal(roomRow(three.code).status, 'waiting');
++  assert.equal(q('SELECT * FROM sets').length, 0);
++
++  const four = newRoom(io, 4);
++  four.clients[1].emit('start_game', { roomCode: four.code });            // not the Host
++  assert.equal(roomRow(four.code).status, 'waiting');
++  assert.equal(q('SELECT * FROM sets WHERE room_id = ?', roomRow(four.code).id).length, 0);
++
++  four.clients[0].emit('start_game', { roomCode: four.code });
++  four.clients[0].emit('start_game', { roomCode: four.code });            // repeated
++  assert.equal(q('SELECT * FROM sets WHERE room_id = ?', roomRow(four.code).id).length, 1, 'start berulang tidak boleh membuat set kedua');
++});
++
++test('set selesai: rooms done, sets.ended_at terisi, games 1..N, game_scores 4 baris per game, jumlah skor = skor set di memori', async () => {
++  const { io } = setup();
++  const room = newRoom(io, 4, { start: true });
++  await playSetToEnd(room.clients, room.users, room.code);
++  const r = roomRow(room.code);
++  assert.equal(r.status, 'done');
++
++  const set = one('SELECT * FROM sets WHERE room_id = ?', r.id);
++  assert.ok(set.ended_at, 'ended_at harus terisi saat set selesai');
++
++  const games = q('SELECT * FROM games WHERE set_id = ? ORDER BY game_number', set.id);
++  assert.deepEqual(games.map((g) => g.game_number), [1, 2, 3, 4]);
++  for (const g of games) {
++    assert.ok(room.users.includes(g.winner_id), `pemenang game ${g.game_number} harus salah satu pemain`);
++    assert.ok(typeof g.win_type === 'string' && g.win_type.length > 0);
++    assert.ok(g.ended_at);
++    const scores = q('SELECT * FROM game_scores WHERE game_id = ?', g.id);
++    assert.equal(scores.length, 4);
++    assert.deepEqual(scores.map((s) => s.user_id).sort(), [...room.users].sort());
++    for (const s of scores) {
++      assert.ok(Number.isInteger(s.score));
++      assert.ok(Array.isArray(JSON.parse(s.remaining_cards)), 'remaining_cards harus JSON array');
++    }
++  }
++  const sums = Object.fromEntries(q('SELECT user_id, SUM(score) AS total FROM game_scores GROUP BY user_id').map((x) => [x.user_id, x.total]));
++  const mem = rm.getRoom(room.code).setScores;
++  for (const u of room.users) assert.equal(sums[u], mem[u], `skor set ${u}: DB ${sums[u]} vs memori ${mem[u]}`);
++});
++
++test('set kedua di Room yang sama: return_to_room → waiting, lalu sets kedua; set pertama tetap utuh', async () => {
++  const { io } = setup();
++  const room = newRoom(io, 4, { start: true });
++  await playSetToEnd(room.clients, room.users, room.code);
++  const roomId = roomRow(room.code).id;
++  const firstSet = one('SELECT * FROM sets WHERE room_id = ?', roomId);
++
++  room.clients[0].emit('return_to_room', { roomCode: room.code });
++  assert.equal(roomRow(room.code).status, 'waiting');
++
++  // Only the Host is back: the start is refused (PLAYERS_NOT_READY) and writes nothing.
++  room.clients[0].emit('start_game', { roomCode: room.code });
++  assert.ok(errCodes(room.clients[0]).includes('PLAYERS_NOT_READY'));
++  assert.equal(q('SELECT * FROM sets WHERE room_id = ?', roomId).length, 1);
++  assert.equal(roomRow(room.code).status, 'waiting');
++
++  for (const c of room.clients.slice(1)) c.emit('return_to_room', { roomCode: room.code });
++  room.clients[0].emit('start_game', { roomCode: room.code });
++  assert.equal(roomRow(room.code).status, 'playing');
++  assert.equal(q('SELECT * FROM sets WHERE room_id = ?', roomId).length, 2);
++  await playSetToEnd(room.clients, room.users, room.code);
++
++  const sets = q('SELECT * FROM sets WHERE room_id = ? ORDER BY started_at, rowid', roomId);
++  assert.equal(sets.length, 2);
++  assert.deepEqual({ ...sets.find((s) => s.id === firstSet.id) }, firstSet, 'set pertama tidak boleh berubah');
++  assert.ok(sets.every((s) => s.ended_at));
++  assert.equal(roomRow(room.code).status, 'done');
++  const perSet = sets.map((s) => q('SELECT * FROM games WHERE set_id = ?', s.id).length);
++  assert.deepEqual(perSet, [4, 4], 'masing-masing set punya 4 game');
++  assert.equal(q('SELECT * FROM game_scores').length, 32);
++});
++
++test('pemain terakhir keluar: rooms closed; keluar sebagian: tetap waiting', () => {
++  const { io } = setup();
++  const room = newRoom(io, 4);
++  room.clients[3].emit('leave_room', { roomCode: room.code });
++  assert.equal(roomRow(room.code).status, 'waiting');
++  for (const c of room.clients.slice(0, 3)) c.emit('leave_room', { roomCode: room.code });
++  assert.ok(!rm.getRoom(room.code), 'Room dihapus dari memori');
++  assert.equal(roomRow(room.code).status, 'closed');
++});
++
++test('closeStaleRooms (S8) pada Room hasil kode asli: waiting dan playing ditutup, done tetap', async () => {
++  const { io } = setup();
++  const waiting = newRoom(io, 2);
++  const playing = newRoom(io, 4, { start: true });
++  const done = newRoom(io, 4, { start: true });
++  await playSetToEnd(done.clients, done.users, done.code);
++  assert.deepEqual([waiting, playing, done].map((r) => roomRow(r.code).status), ['waiting', 'playing', 'done']);
++
++  assert.equal(memdb.closeStaleRooms(memdb.handle()), 2);
++  assert.deepEqual([waiting, playing, done].map((r) => roomRow(r.code).status), ['closed', 'closed', 'done']);
++  assert.equal(one('SELECT ended_at FROM sets WHERE room_id = ?', roomRow(playing.code).id).ended_at, null, 'set yang terputus dibiarkan (NULL)');
++  assert.equal(memdb.closeStaleRooms(memdb.handle()), 0);
++});
++
++// ── the error recorder of the harness (it is what makes swallowed SQL errors fail a scenario) ──────────────────────
++test('harness: error SQL tercatat (prepare, exec, run) dan takeErrors() mengosongkan catatan', () => {
++  setup();
++  memdb.takeErrors();
++  const db = memdb.handle();
++  assert.throws(() => db.prepare('SELECT * FROM table_that_does_not_exist'));
++  assert.throws(() => db.exec('NOT SQL AT ALL'));
++  assert.throws(() => db.prepare("INSERT INTO rooms (id, code, host_id) VALUES ('a','AAAAAA','h')").run() && db.prepare("INSERT INTO rooms (id, code, host_id) VALUES ('b','AAAAAA','h')").run());
++  const got = memdb.takeErrors();
++  assert.equal(got.length, 3, `harus 3 error tercatat, dapat: ${JSON.stringify(got)}`);
++  assert.match(got[0], /table_that_does_not_exist/);
++  assert.match(got[2], /UNIQUE|constraint/i);
++  assert.deepEqual(memdb.takeErrors(), [], 'setelah diambil, catatan kosong');
++  memdb.takeErrors();
++});
++
++test('harness: setup() memulai database kosong baru di tiap skenario (tidak ada data bocor antar tes)', () => {
++  setup();
++  memdb.handle().exec("INSERT INTO rooms (id, code, host_id) VALUES ('x','XXXXXX','h')");
++  setup();
++  assert.equal(q('SELECT * FROM rooms').length, 0);
++});
++
++function runHarnessChild(body) {
++  const file = path.join(os.tmpdir(), `martil-harness-${process.pid}-${Date.now()}.js`);
++  fs.writeFileSync(file, `const { rm, setup, newRoom, runTests, memdb } = require(${JSON.stringify(path.join(__dirname, 'helpers/sim'))});\nrunTests([{ name: 'skenario', fn: () => { ${body} } }]);\n`);
++  try {
++    const r = spawnSync(process.execPath, [file], { env: { ...process.env, NODE_NO_WARNINGS: '1' }, encoding: 'utf8' });
++    return { status: r.status, out: `${r.stdout}${r.stderr}` };
++  } finally { fs.rmSync(file, { force: true }); }
++}
++
++test('runTests: skenario yang error SQL-nya tertelan harus GAGAL (exit 1, pesan "error SQL tertelan"); skenario bersih lulus', () => {
++  const swallowed = runHarnessChild("setup(); try { memdb.handle().prepare('SELECT * FROM table_that_does_not_exist'); } catch { /* swallowed like onSafe does */ }");
++  assert.equal(swallowed.status, 1, swallowed.out);
++  assert.match(swallowed.out, /FAIL\s+skenario/);
++  assert.match(swallowed.out, /error SQL tertelan/);
++  assert.match(swallowed.out, /table_that_does_not_exist/);
++  const clean = runHarnessChild("const { io } = setup(); newRoom(io, 2);");
++  assert.equal(clean.status, 0, clean.out);
++  assert.match(clean.out, /PASS\s+skenario/);
++});
++
++test('reconnect.sim.js (runner sendiri): juga mengambil dan memeriksa error SQL tertelan di tiap skenario', () => {
++  const src = fs.readFileSync(path.join(__dirname, 'reconnect.sim.js'), 'utf8');
++  assert.ok((src.match(/memdb\.takeErrors\(\)/g) || []).length >= 2, 'runner harus mengosongkan sebelum dan memeriksa sesudah tiap skenario');
++  assert.match(src, /error SQL tertelan/);
++  assert.match(src, /memdb\.fresh\(\)/, 'setup() harus memulai database baru');
++});
++
++runTests(tests);
+diff --git a/backend/tests/helpers/memdb.js b/backend/tests/helpers/memdb.js
+new file mode 100644
+index 0000000..c4ba242
+--- /dev/null
++++ b/backend/tests/helpers/memdb.js
+@@ -0,0 +1,66 @@
++'use strict';
++/**
++ * Real SQLite in memory with the production schema, for the simulation suites (replaces the old no-op DB stub).
++ * `handle()` is the current database; `fresh()` swaps in a brand-new empty one (call it at the start of every scenario);
++ * `takeErrors()` returns (and clears) every SQL error raised since the last call.
++ * Only the database file location differs from production: the schema and the SQL statements are the real ones.
++ */
++const path = require('path');
++
++// node:sqlite prints a one-time ExperimentalWarning when first loaded; keep the test output quiet.
++const emitWarning = process.emitWarning;
++process.emitWarning = function (warning, ...rest) {
++  const text = typeof warning === 'string' ? warning : (warning && warning.message) || '';
++  if (/sqlite/i.test(text)) return undefined;
++  return emitWarning.call(process, warning, ...rest);
++};
++const realDb = require(path.join(__dirname, '../../src/db/database.js')); // the REAL module (loaded before it gets stubbed)
++const { openDatabase, closeStaleRooms } = realDb;
++process.emitWarning = emitWarning;
++
++const opened = [];
++let current = null;
++const errors = [];
++
++// Socket handlers run inside onSafe(), which swallows exceptions (the sender just gets INTERNAL_ERROR), so a failing
++// SQL statement would never fail a test by itself. Every database/statement error is recorded here instead; the
++// runners call takeErrors() after each scenario and fail it when anything was recorded.
++const record = (sql, e) => errors.push(`${e && e.code ? `${e.code}: ` : ''}${e && e.message}${sql ? ` [${String(sql).replace(/\s+/g, ' ').slice(0, 90)}]` : ''}`);
++function watchStatement(stmt, sql) {
++  return new Proxy(stmt, {
++    get(target, key) {
++      const v = target[key];
++      if (typeof v !== 'function') return v;
++      return (...args) => { try { return v.apply(target, args); } catch (e) { record(sql, e); throw e; } };
++    },
++  });
++}
++function watch(d) {
++  return new Proxy(d, {
++    get(target, key) {
++      const v = target[key];
++      if (typeof v !== 'function') return v;
++      if (key === 'prepare') return (sql) => { try { return watchStatement(target.prepare(sql), sql); } catch (e) { record(sql, e); throw e; } };
++      if (key === 'exec') return (sql) => { try { return target.exec(sql); } catch (e) { record(sql, e); throw e; } };
++      return v.bind(target);
++    },
++  });
++}
++
++function fresh() {
++  const raw = openDatabase(':memory:');
++  opened.push(raw);
++  current = watch(raw);
++  return current;
++}
++function handle() {
++  return current || fresh();
++}
++function takeErrors() {
++  return errors.splice(0);
++}
++
++// Close every handle when the suite ends (a handle is kept open until then in case server code still holds a statement).
++process.on('exit', () => { for (const d of opened.splice(0)) { try { d.close(); } catch { /* already closed */ } } });
++
++module.exports = { fresh, handle, takeErrors, closeStaleRooms };
+diff --git a/backend/tests/helpers/sim.js b/backend/tests/helpers/sim.js
+index 61ed4de..baa6033 100644
+--- a/backend/tests/helpers/sim.js
++++ b/backend/tests/helpers/sim.js
+@@ -2,7 +2,7 @@
+ /**
+  * Helper bersama untuk simulasi multiplayer (Socket.IO tiruan di memori).
+  * Menjalankan socketHandler.js, roomManager.js, dan engine.js ASLI.
+- * Di-stub: JWT (token = JSON), database (no-op), uuid (crypto.randomUUID).
++ * Di-stub: JWT (token = JSON) dan uuid (crypto.randomUUID). Database: SQLite ASLI di memori dengan skema produksi (helpers/memdb.js).
+  * Waktu disimulasikan dengan menggeser Date.now(); jeda 5 detik antar-game dipercepat.
+  */
+ const assert = require('node:assert/strict');
+@@ -17,7 +17,8 @@ function stub(rel, exports) {
+   require.cache[file] = { id: file, filename: file, loaded: true, exports };
+ }
+ stub('auth/jwt.js', { verifyToken: (t) => JSON.parse(t), signToken: () => '' });
+-stub('db/database.js', { db: () => ({ prepare: () => ({ run() {}, get() {}, all() { return []; } }), exec() {} }) });
++const memdb = require('./memdb');
++stub('db/database.js', { db: () => memdb.handle() });
+ const origLoad = Module._load;
+ Module._load = function (request, ...rest) {
+   if (request === 'uuid') return { v4: () => crypto.randomUUID() };
+@@ -86,6 +87,7 @@ class Client {
+ // ── Helper skenario ──────────────────────────────────────────────────────────
+ let seq = 0;
+ function setup() {
++  memdb.fresh();                                   // every scenario starts with an empty real database
+   const io = new FakeIO();
+   const handle = registerSocketHandlers(io, { sweepIntervalMs: 0 });
+   return { io, handle };
+@@ -133,7 +135,13 @@ async function runTests(tests) {
+   let failed = 0;
+   for (const { name, fn } of tests) {
+     resetClock();
+-    try { await fn(); realLog(`  PASS  ${name}`); }
++    memdb.takeErrors();
++    try {
++      await fn();
++      const dbErrors = memdb.takeErrors();
++      if (dbErrors.length) throw new Error(`error SQL tertelan oleh server selama skenario:\n  ${dbErrors.join('\n  ')}`);
++      realLog(`  PASS  ${name}`);
++    }
+     catch (e) { failed += 1; realLog(`  FAIL  ${name}\n        ${String(e.stack || e.message).split('\n').slice(0, 6).join('\n        ')}`); }
+   }
+   console.info = realInfo;
+@@ -143,6 +151,6 @@ async function runTests(tests) {
+ const resetClock = () => { offsetMs = 0; };
+ 
+ module.exports = {
+-  assert, rm, FakeIO, Client, setup, newRoom, uid, player, handIds,
++  assert, rm, FakeIO, Client, setup, memdb, newRoom, uid, player, handIds,
+   advance, resetClock, playSetToEnd, runTests, tick, realLog,
+ };
+diff --git a/backend/tests/reconnect.sim.js b/backend/tests/reconnect.sim.js
+index 51f1764..1e8585f 100644
+--- a/backend/tests/reconnect.sim.js
++++ b/backend/tests/reconnect.sim.js
+@@ -5,7 +5,7 @@
+  *
+  *   npm run test:sim      (dari folder backend)
+  *
+- * Yang di-stub: JWT (token = JSON), database (no-op), uuid (crypto.randomUUID).
++ * Yang di-stub: JWT (token = JSON) dan uuid (crypto.randomUUID). Database: SQLite ASLI di memori dengan skema produksi (helpers/memdb.js).
+  * Waktu disimulasikan dengan menggeser Date.now(), jadi tidak perlu menunggu 60 detik.
+  * Skrip ini TIDAK menguji transport WebSocket asli maupun React — untuk itu gunakan
+  * uji manual 4 tab (lihat README).
+@@ -23,7 +23,8 @@ function stub(rel, exports) {
+   require.cache[file] = { id: file, filename: file, loaded: true, exports };
+ }
+ stub('auth/jwt.js', { verifyToken: (t) => JSON.parse(t), signToken: () => '' });
+-stub('db/database.js', { db: () => ({ prepare: () => ({ run() {}, get() {}, all() { return []; } }), exec() {} }) });
++const memdb = require('./helpers/memdb');
++stub('db/database.js', { db: () => memdb.handle() });
+ const origLoad = Module._load;
+ Module._load = function (request, ...rest) {
+   if (request === 'uuid') return { v4: () => crypto.randomUUID() };
+@@ -92,6 +93,7 @@ class Client {
+ // ── Helper skenario ──────────────────────────────────────────────────────────
+ let seq = 0;
+ function setup() {
++  memdb.fresh();                                   // every scenario starts with an empty real database
+   const io = new FakeIO();
+   const handle = registerSocketHandlers(io, { sweepIntervalMs: 0 });
+   return { io, handle };
+@@ -355,7 +357,13 @@ test('join_room oleh anggota yang sudah ada diperlakukan sebagai resume (bukan A
+ let failed = 0;
+ for (const { name, fn } of tests) {
+   offsetMs = 0;
+-  try { fn(); realLog(`  PASS  ${name}`); }
++  memdb.takeErrors();
++  try {
++    fn();
++    const dbErrors = memdb.takeErrors();
++    if (dbErrors.length) throw new Error(`error SQL tertelan oleh server selama skenario:\n  ${dbErrors.join('\n  ')}`);
++    realLog(`  PASS  ${name}`);
++  }
+   catch (e) { failed += 1; realLog(`  FAIL  ${name}\n        ${e.message.split('\n').join('\n        ')}`); }
+ }
+ console.info = realInfo;
+diff --git a/frontend/package.json b/frontend/package.json
+index 8129d5c..9720bff 100644
+--- a/frontend/package.json
++++ b/frontend/package.json
+@@ -7,6 +7,7 @@
+     "dev": "vite",
+     "build": "vite build",
+     "preview": "vite preview",
++    "test": "node ../scripts/run-tests.mjs --only frontend",
+     "test:sync": "node tests/sync.sim/main.mjs",
+     "test:server-errors": "node tests/server-errors/run.mjs",
+     "test:names": "node tests/player-names/run.mjs"
+diff --git a/package.json b/package.json
+index eaaf2a1..29316e5 100644
+--- a/package.json
++++ b/package.json
+@@ -8,6 +8,9 @@
+     "dev": "npm run dev:backend & npm run dev:frontend",
+     "dev:backend":  "npm --prefix backend run dev",
+     "dev:frontend": "npm --prefix frontend run dev",
+-    "build": "npm --prefix frontend run build"
++    "build": "npm --prefix frontend run build",
++    "test": "node scripts/run-tests.mjs",
++    "test:backend": "node scripts/run-tests.mjs --only backend",
++    "test:frontend": "node scripts/run-tests.mjs --only frontend"
+   }
+ }
+diff --git a/scripts/run-tests.mjs b/scripts/run-tests.mjs
+new file mode 100644
+index 0000000..c22a266
+--- /dev/null
++++ b/scripts/run-tests.mjs
+@@ -0,0 +1,210 @@
++#!/usr/bin/env node
++/**
++ * One command for every test suite (backend + frontend). Plain Node: works the same on Windows, macOS and Linux.
++ *
++ *   npm test                          (from the project root: everything)
++ *   npm test -- --only backend        (only suites whose name contains "backend"; comma-separated list allowed)
++ *   npm test -- --strict              (a SKIP, also a partial one, counts as a failure)
++ *   npm test -- --list                (print the suites and exit)
++ *   node scripts/run-tests.mjs --help
++ *
++ * Suites run one after another (several tests use the real clock, so they are not run in parallel). Each suite's output
++ * is kept and only shown when it fails (or with --verbose). A suite is:
++ *   PASS  exit code 0 (and no inconsistent "N/M lulus" count, and no FAIL line)
++ *   FAIL  non-zero exit code, timeout, cannot start, or inconsistent output
++ *   SKIP  not run, or everything in it was skipped (e.g. render tests without dependencies, a suite that needs bash):
++ *         never a silent pass; shown in the summary. SKIP is not a failure unless --strict.
++ * Exit code: 0 all good, 1 a suite failed (or SKIP with --strict), 2 usage error.
++ *
++ * Suites that need bash use the program named by MARTIL_BASH (default "bash"). On Windows point it at Git Bash when
++ * `bash` on your PATH is WSL, e.g. in PowerShell:  $env:MARTIL_BASH = "C:\Program Files\Git\bin\bash.exe"
++ */
++import { spawnSync } from 'node:child_process';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++
++// ── suite list ───────────────────────────────────────────────────────────────────────────────────────
++const BASH = { type: 'bash', reason: 'butuh bash (mis. Git Bash di Windows; atur MARTIL_BASH bila `bash` di PATH bukan yang benar)' };
++const be = (name, file) => ({ name: `backend:${name}`, cwd: 'backend', cmd: ['node', `tests/${file}`] });
++const fe = (name, cmd, extra = {}) => ({ name: `frontend:${name}`, cwd: 'frontend', cmd, ...extra });
++const feBash = (name) => fe(name, ['bash', `tests/${name}/run.sh`], { requires: [BASH] });
++
++const DEFAULT_SUITES = [
++  be('reconnect', 'reconnect.sim.js'),
++  be('room-navigation', 'room-navigation.sim.js'),
++  be('kick', 'kick.sim.js'),
++  be('combo', 'combo.consistency.js'),
++  be('card-ids', 'card-ids.sim.js'),
++  be('payload-guards', 'payload-guards.sim.js'),
++  be('turn-timer', 'turn-timer.sim.js'),
++  be('intermission', 'intermission.sim.js'),
++  be('max-games', 'max-games.sim.js'),
++  be('single-room', 'single-room.sim.js'),
++  be('profiles', 'profiles.sim.js'),
++  be('host-retention', 'host-retention.sim.js'),
++  be('config-jwt', 'config-jwt.sim.js'),
++  be('debug-log', 'debug-log.sim.js'),
++  be('db-schema', 'db-schema.sim.js'),
++  be('db-persistence', 'db-persistence.sim.js'),
++  {
++    name: 'backend:jest', cwd: 'backend', cmd: ['node', 'node_modules/jest/bin/jest.js'],
++    requires: [{ type: 'file', path: 'node_modules/jest/bin/jest.js', reason: 'jest belum terpasang: jalankan "npm install" di folder backend' }],
++  },
++  fe('sync', ['node', 'tests/sync.sim/main.mjs']),
++  fe('server-errors', ['node', 'tests/server-errors/run.mjs']),
++  fe('player-names', ['node', 'tests/player-names/run.mjs']),
++  feBash('combo-ui'),
++  feBash('kick-ui'),
++  feBash('lobby-ui'),
++  feBash('game-ui'),
++  { name: 'tools:runner', cwd: '.', cmd: ['node', 'scripts/run-tests.test.mjs'] },
++];
++
++// ── arguments ────────────────────────────────────────────────────────────────────────────────────────
++function parseArgs(argv) {
++  const o = { only: [], strict: false, list: false, verbose: false, timeoutSec: 180, suitesFile: null, help: false };
++  for (let i = 0; i < argv.length; i += 1) {
++    const a = argv[i];
++    const val = () => { i += 1; if (i >= argv.length) throw new Error(`${a} butuh nilai`); return argv[i]; };
++    if (a === '--only') o.only.push(...val().split(',').map((s) => s.trim()).filter(Boolean));
++    else if (a === '--strict') o.strict = true;
++    else if (a === '--list') o.list = true;
++    else if (a === '--verbose') o.verbose = true;
++    else if (a === '--timeout') {
++      const n = Number(val());
++      if (!Number.isFinite(n) || n <= 0) throw new Error('--timeout harus angka detik > 0');
++      o.timeoutSec = n;
++    } else if (a === '--suites') o.suitesFile = val();
++    else if (a === '--help' || a === '-h') o.help = true;
++    else throw new Error(`opsi tidak dikenal: ${a}`);
++  }
++  return o;
++}
++
++const HELP = `Penggunaan: node scripts/run-tests.mjs [opsi]
++  --only a,b      hanya suite yang namanya memuat salah satu kata (mis. backend, kick, frontend:sync)
++  --strict        SKIP (juga sebagian) dianggap gagal
++  --list          tampilkan daftar suite lalu keluar
++  --verbose       tampilkan output semua suite, bukan hanya yang gagal
++  --timeout N     batas waktu per suite dalam detik (bawaan 180)
++  --suites FILE   pakai daftar suite dari berkas JSON (untuk menguji runner)
++Exit code: 0 semua baik, 1 ada suite gagal (atau SKIP dengan --strict), 2 salah pemakaian.`;
++
++// ── running ──────────────────────────────────────────────────────────────────────────────────────────
++const BASH_EXE = process.env.MARTIL_BASH || 'bash';
++let bashOk;
++function hasBash() {
++  if (bashOk === undefined) {
++    const r = spawnSync(BASH_EXE, ['--version'], { encoding: 'utf8' });
++    bashOk = !r.error && r.status === 0;
++  }
++  return bashOk;
++}
++
++function missingRequirement(suite) {
++  for (const req of suite.requires || []) {
++    if (req.type === 'bash' && !hasBash()) return req.reason || 'butuh bash';
++    if (req.type === 'file' && !fs.existsSync(path.resolve(ROOT, suite.cwd || '.', req.path))) return req.reason || `berkas tidak ada: ${req.path}`;
++  }
++  return null;
++}
++
++// Summary lines "N/M lulus" printed by the suites (several per suite possible: e.g. logic + render), and Jest's own
++// summary. Only lines that START with the count are read, so a test NAME that mentions "2/3 lulus" is never counted.
++function parseCounts(output) {
++  let passed = 0; let total = 0; let found = false;
++  for (const m of output.matchAll(/^\s*(\d+)\/(\d+) lulus/gm)) { passed += Number(m[1]); total += Number(m[2]); found = true; }
++  const jest = output.match(/^Tests:\s+(?:\d+ failed, )?(?:\d+ skipped, )?(\d+) passed, (\d+) total/m);
++  if (jest) { passed += Number(jest[1]); total += Number(jest[2]); found = true; }
++  return { passed, total, found };
++}
++
++function runSuite(suite, { timeoutSec }) {
++  const base = { name: suite.name, passed: 0, total: 0, ms: 0, note: '', output: '' };
++  const missing = missingRequirement(suite);
++  if (missing) return { ...base, status: 'SKIP', note: missing };
++
++  const [exe, ...args] = suite.cmd;
++  const program = exe === 'node' ? process.execPath : exe === 'bash' ? BASH_EXE : exe;
++  const started = Date.now();
++  const r = spawnSync(program, args, {
++    cwd: path.resolve(ROOT, suite.cwd || '.'),
++    env: process.env,
++    encoding: 'utf8',
++    timeout: (suite.timeoutSec || timeoutSec) * 1000,
++    maxBuffer: 64 * 1024 * 1024,
++  });
++  const ms = Date.now() - started;
++  const output = `${r.stdout || ''}${r.stderr || ''}`;
++  const common = { ...base, ms, output };
++
++  if (r.error && r.error.code === 'ETIMEDOUT') return { ...common, status: 'FAIL', note: `timeout setelah ${suite.timeoutSec || timeoutSec} dtk` };
++  if (r.error) return { ...common, status: 'FAIL', note: `tidak bisa dijalankan: ${r.error.message}` };
++  if (r.status !== 0) return { ...common, status: 'FAIL', note: `exit code ${r.status === null ? `(sinyal ${r.signal})` : r.status}` };
++
++  const counts = parseCounts(output);
++  if (/^\s*FAIL\b/m.test(output)) return { ...common, ...counts, status: 'FAIL', note: 'ada baris FAIL padahal exit code 0' };
++  if (counts.found && counts.passed < counts.total) return { ...common, ...counts, status: 'FAIL', note: `hitungan tidak konsisten (${counts.passed}/${counts.total}) padahal exit code 0` };
++
++  const skips = [...output.matchAll(/^\s*SKIP\b.*$/gm)].map((m) => m[0].trim().replace(/\s+/g, ' '));
++  if (skips.length && !counts.found) return { ...common, status: 'SKIP', note: `seluruhnya dilewati: ${skips[0].replace(/^SKIP\s*/, '')}` };
++  if (skips.length) return { ...common, ...counts, status: 'PASS', partialSkips: skips.length, note: `${skips.length} bagian SKIP: ${skips[0].replace(/^SKIP\s*/, '').slice(0, 80)}` };
++  return { ...common, ...counts, status: 'PASS' };
++}
++
++// ── main ─────────────────────────────────────────────────────────────────────────────────────────────
++function main(argv) {
++  let opts;
++  try { opts = parseArgs(argv); } catch (e) { console.error(`${e.message}\n\n${HELP}`); return 2; }
++  if (opts.help) { console.log(HELP); return 0; }
++
++  let suites = DEFAULT_SUITES;
++  if (opts.suitesFile) {
++    try { suites = JSON.parse(fs.readFileSync(opts.suitesFile, 'utf8')); } catch (e) { console.error(`tidak bisa membaca --suites: ${e.message}`); return 2; }
++  }
++  if (opts.only.length) suites = suites.filter((s) => opts.only.some((w) => s.name.includes(w)));
++  if (suites.length === 0) { console.error(`tidak ada suite yang cocok dengan: ${opts.only.join(', ')}  (lihat --list)`); return 2; }
++  if (opts.list) { for (const s of suites) console.log(s.name); return 0; }
++
++  const width = Math.max(...suites.map((s) => s.name.length)) + 2;
++  const results = [];
++  const started = Date.now();
++  console.log(`Menjalankan ${suites.length} suite (node ${process.version})\n`);
++  for (const suite of suites) {
++    const res = runSuite(suite, opts);
++    results.push(res);
++    const counts = res.total ? `${res.passed}/${res.total}` : '-';
++    console.log(`  ${res.status.padEnd(5)} ${res.name.padEnd(width)}${counts.padStart(9)}  ${(res.ms / 1000).toFixed(1).padStart(5)}s${res.note ? `  ${res.note}` : ''}`);
++    if (opts.verbose && res.output) console.log(res.output.trimEnd().split('\n').map((l) => `        | ${l}`).join('\n'));
++  }
++
++  const failed = results.filter((r) => r.status === 'FAIL');
++  const skipped = results.filter((r) => r.status === 'SKIP');
++  const partial = results.filter((r) => r.partialSkips);
++  const passed = results.filter((r) => r.status === 'PASS');
++  const tests = results.reduce((a, r) => ({ passed: a.passed + r.passed, total: a.total + r.total }), { passed: 0, total: 0 });
++
++  if (!opts.verbose) {
++    for (const r of failed) {
++      console.log(`\n── ${r.name}: ${r.note}`);
++      const tail = r.output.trimEnd().split('\n').slice(-40);
++      console.log(tail.map((l) => `   | ${l}`).join('\n'));
++    }
++  }
++
++  console.log(`\nRingkasan: ${results.length} suite: ${passed.length} PASS, ${failed.length} FAIL, ${skipped.length} SKIP`
++    + ` | tes terhitung: ${tests.passed}/${tests.total} lulus | ${((Date.now() - started) / 1000).toFixed(1)}s`);
++  if (skipped.length || partial.length) {
++    console.log('SKIP bukan lulus: bagian ini TIDAK teruji pada eksekusi ini:');
++    for (const r of [...skipped, ...partial]) console.log(`  - ${r.name}: ${r.note}`);
++    console.log(opts.strict ? '(--strict: SKIP dihitung gagal)' : '(gunakan --strict agar SKIP dihitung gagal)');
++  }
++  if (failed.length) return 1;
++  if (opts.strict && (skipped.length || partial.length)) return 1;
++  return 0;
++}
++
++process.exitCode = main(process.argv.slice(2));
+diff --git a/scripts/run-tests.test.mjs b/scripts/run-tests.test.mjs
+new file mode 100644
+index 0000000..8eaece0
+--- /dev/null
++++ b/scripts/run-tests.test.mjs
+@@ -0,0 +1,239 @@
++/**
++ * Tests for scripts/run-tests.mjs, using fake suites (small scripts in a temp folder) plus a tiny real run.
++ *   node scripts/run-tests.test.mjs        (also runs as the "tools:runner" suite of the runner itself)
++ *
++ * Covered: exit codes (0 / 1 / 2), PASS vs FAIL vs SKIP, strict mode, timeouts, a suite that cannot start, inconsistent
++ * "N/M lulus" counts, a FAIL line with exit code 0, partial and full SKIP, Jest-style counts, --only / --list / --verbose /
++ * --help, bad usage, and that every backend/frontend test file in the repo is wired into the runner.
++ */
++import assert from 'node:assert/strict';
++import { spawnSync } from 'node:child_process';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++const RUNNER = path.join(ROOT, 'scripts/run-tests.mjs');
++const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'martil-runner-test-'));
++
++// ── fake suites ──────────────────────────────────────────────────────────────────────────────────────
++const script = (name, body) => { const f = path.join(tmp, name); fs.writeFileSync(f, body); return f; };
++const S = {
++  pass: script('pass.js', "console.log('  PASS  a\\n  PASS  b\\n  PASS  c\\n\\n3/3 lulus');"),
++  noCounts: script('nocounts.js', "console.log('Semua uji konsistensi lulus');"),
++  multi: script('multi.js', "console.log('48/48 lulus\\n26/26 lulus (render)');"),
++  jest: script('jest.js', "console.error('Tests:       3 passed, 3 total');"),
++  fail: script('fail.js', "console.log('  FAIL  x\\n        boom-detail\\n\\n1/3 lulus'); process.exit(1);"),
++  nameWithCount: script('namewithcount.js', "console.log('  PASS  hitungan tidak konsisten (2/3 lulus tetapi exit code 0)\\n  PASS  b\\n\\n2/2 lulus');"),
++  failLine: script('failline.js', "console.log('  FAIL  x\\n2/3 lulus');"),
++  inconsistent: script('inconsistent.js', "console.log('2/3 lulus');"),
++  partialSkip: script('partialskip.js', "console.log('5/5 lulus\\n  SKIP   render: dependency belum terpasang (esbuild)');"),
++  fullSkip: script('fullskip.js', "console.log('  SKIP   render Lobby: dependency belum terpasang (esbuild)');"),
++  slow: script('slow.js', 'setTimeout(() => {}, 8000);'),
++  existing: script('existing.txt', 'x'),
++};
++const missingFile = path.join(tmp, 'does-not-exist.bin');
++const suite = (name, file, extra = {}) => ({ name, cwd: tmp, cmd: ['node', file], ...extra });
++
++function run(args, suites, env = {}) {
++  const list = path.join(tmp, `suites-${Math.random().toString(36).slice(2)}.json`);
++  if (suites) fs.writeFileSync(list, JSON.stringify(suites));
++  const r = spawnSync(process.execPath, [RUNNER, ...(suites ? ['--suites', list] : []), ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
++  return { status: r.status, out: `${r.stdout}${r.stderr}` };
++}
++const line = (out, name) => out.split('\n').find((l) => l.includes(` ${name} `) || l.trimEnd().endsWith(` ${name}`)) || '';
++
++const tests = [];
++const test = (name, fn) => tests.push({ name, fn });
++
++// ── tests ────────────────────────────────────────────────────────────────────────────────────────────
++test('semua suite lulus → exit 0; hitungan dijumlahkan (termasuk beberapa baris "lulus" dan format Jest); tanpa hitungan tampil "-"', () => {
++  const r = run([], [
++    suite('t:pass', S.pass), suite('t:nocounts', S.noCounts), suite('t:multi', S.multi), suite('t:jest', S.jest),
++    suite('t:req-ok', S.pass, { requires: [{ type: 'file', path: S.existing, reason: 'x' }] }),
++  ]);
++  assert.equal(r.status, 0, r.out);
++  assert.match(r.out, /5 suite: 5 PASS, 0 FAIL, 0 SKIP/);
++  assert.match(r.out, /tes terhitung: 83\/83 lulus/);   // 3 + 74 + 3 + 3
++  assert.match(line(r.out, 't:multi'), /PASS\s+t:multi\s+74\/74/);
++  assert.match(line(r.out, 't:jest'), /3\/3/);
++  assert.match(line(r.out, 't:nocounts'), /PASS\s+t:nocounts\s+-/);
++  assert.ok(!/SKIP bukan lulus/.test(r.out), 'tanpa SKIP tidak ada peringatan SKIP');
++});
++
++test('satu suite gagal → exit 1, suite lain tetap dijalankan, output suite yang gagal ditampilkan', () => {
++  const r = run([], [suite('t:before', S.pass), suite('t:fail', S.fail), suite('t:after', S.pass)]);
++  assert.equal(r.status, 1, r.out);
++  assert.match(r.out, /3 suite: 2 PASS, 1 FAIL, 0 SKIP/);
++  assert.match(line(r.out, 't:fail'), /FAIL\s+t:fail\s+.*exit code 1/);
++  assert.match(line(r.out, 't:after'), /PASS/, 'suite sesudah yang gagal tetap dijalankan');
++  assert.match(r.out, /boom-detail/, 'output suite gagal harus tampil');
++});
++
++test('nama tes yang memuat teks "2/3 lulus" tidak ikut terhitung (hanya baris ringkasan yang dibaca)', () => {
++  const r = run([], [suite('t:name', S.nameWithCount)]);
++  assert.equal(r.status, 0, r.out);
++  assert.match(line(r.out, 't:name'), /PASS\s+t:name\s+2\/2/);
++  assert.match(r.out, /tes terhitung: 2\/2 lulus/);
++});
++
++test('baris FAIL padahal exit code 0 → dianggap gagal', () => {
++  const r = run([], [suite('t:failline', S.failLine)]);
++  assert.equal(r.status, 1, r.out);
++  assert.match(r.out, /ada baris FAIL padahal exit code 0/);
++});
++
++test('hitungan tidak konsisten (2/3 lulus tetapi exit code 0) → gagal', () => {
++  const r = run([], [suite('t:inconsistent', S.inconsistent)]);
++  assert.equal(r.status, 1, r.out);
++  assert.match(r.out, /hitungan tidak konsisten \(2\/3\)/);
++});
++
++test('timeout → FAIL dengan catatan timeout; suite sesudahnya tetap jalan', () => {
++  const r = run([], [suite('t:slow', S.slow, { timeoutSec: 1 }), suite('t:next', S.pass)]);
++  assert.equal(r.status, 1, r.out);
++  assert.match(line(r.out, 't:slow'), /FAIL.*timeout setelah 1 dtk/);
++  assert.match(line(r.out, 't:next'), /PASS/);
++});
++
++test('--timeout mengatur batas bawaan semua suite', () => {
++  const r = run(['--timeout', '1'], [suite('t:slow', S.slow)]);
++  assert.equal(r.status, 1, r.out);
++  assert.match(r.out, /timeout setelah 1 dtk/);
++});
++
++test('perintah tidak ada → FAIL "tidak bisa dijalankan" (bukan crash runner)', () => {
++  const r = run([], [{ name: 't:nocmd', cwd: tmp, cmd: ['definitely-not-a-real-command-xyz'] }, suite('t:ok', S.pass)]);
++  assert.equal(r.status, 1, r.out);
++  assert.match(line(r.out, 't:nocmd'), /FAIL.*tidak bisa dijalankan/);
++  assert.match(line(r.out, 't:ok'), /PASS/);
++});
++
++test('syarat berkas tidak terpenuhi → SKIP dengan alasan, tidak dijalankan, bukan kegagalan; --strict membuatnya gagal', () => {
++  const suites = [suite('t:needs', S.fail, { requires: [{ type: 'file', path: missingFile, reason: 'alasan-skip-berkas' }] }), suite('t:ok', S.pass)];
++  const r = run([], suites);
++  assert.equal(r.status, 0, r.out);
++  assert.match(line(r.out, 't:needs'), /SKIP.*alasan-skip-berkas/);
++  assert.match(r.out, /2 suite: 1 PASS, 0 FAIL, 1 SKIP/);
++  assert.match(r.out, /SKIP bukan lulus/);
++  assert.match(r.out, /- t:needs: alasan-skip-berkas/);
++  const strict = run(['--strict'], suites);
++  assert.equal(strict.status, 1, strict.out);
++  assert.match(strict.out, /--strict: SKIP dihitung gagal/);
++});
++
++test('SKIP sebagian (ada hitungan + baris SKIP) → PASS dengan catatan, tampil di ringkasan; --strict → gagal', () => {
++  const suites = [suite('t:partial', S.partialSkip)];
++  const r = run([], suites);
++  assert.equal(r.status, 0, r.out);
++  assert.match(line(r.out, 't:partial'), /PASS\s+t:partial\s+5\/5.*1 bagian SKIP/);
++  assert.match(r.out, /SKIP bukan lulus/);
++  assert.equal(run(['--strict'], suites).status, 1);
++});
++
++test('SKIP seluruhnya dari output (tanpa hitungan) → status SKIP, bukan PASS', () => {
++  const r = run([], [suite('t:fullskip', S.fullSkip)]);
++  assert.equal(r.status, 0, r.out);
++  assert.match(line(r.out, 't:fullskip'), /SKIP.*seluruhnya dilewati.*dependency belum terpasang/);
++  assert.match(r.out, /0 PASS, 0 FAIL, 1 SKIP/);
++  assert.equal(run(['--strict'], [suite('t:fullskip', S.fullSkip)]).status, 1);
++});
++
++test('suite berbasis bash: bash tidak tersedia (MARTIL_BASH salah) → SKIP "butuh bash", tidak dijalankan; --strict → gagal', () => {
++  const suites = [suite('t:needs-bash', S.fail, { cmd: ['bash', S.fail], requires: [{ type: 'bash', reason: 'butuh bash-uji' }] }), suite('t:ok', S.pass)];
++  const env = { MARTIL_BASH: path.join(tmp, 'no-such-bash') };
++  const r = run([], suites, env);
++  assert.equal(r.status, 0, r.out);
++  assert.match(line(r.out, 't:needs-bash'), /SKIP.*butuh bash-uji/);
++  assert.match(r.out, /2 suite: 1 PASS, 0 FAIL, 1 SKIP/);
++  assert.equal(run(['--strict'], suites, env).status, 1);
++});
++
++test('suite berbasis bash: MARTIL_BASH dipakai sebagai program bash (diuji dengan node sebagai pengganti bash)', () => {
++  const suites = [{ name: 't:bash-ok', cwd: tmp, cmd: ['bash', S.pass], requires: [{ type: 'bash' }] }];
++  const r = run([], suites, { MARTIL_BASH: process.execPath });
++  assert.equal(r.status, 0, r.out);
++  assert.match(line(r.out, 't:bash-ok'), /PASS\s+t:bash-ok\s+3\/3/);
++});
++
++test('--only: cocok sebagian nama, daftar dipisah koma; tidak ada yang cocok → exit 2 tanpa menjalankan apa pun', () => {
++  const suites = [suite('backend:a', S.pass), suite('backend:b', S.fail), suite('frontend:c', S.pass)];
++  const one = run(['--only', 'frontend'], suites);
++  assert.equal(one.status, 0, one.out);
++  assert.match(one.out, /1 suite: 1 PASS/);
++  const two = run(['--only', 'backend:a,frontend:c'], suites);
++  assert.equal(two.status, 0, two.out);
++  assert.match(two.out, /2 suite: 2 PASS/);
++  const none = run(['--only', 'tidak-ada'], suites);
++  assert.equal(none.status, 2);
++  assert.match(none.out, /tidak ada suite yang cocok/);
++});
++
++test('--list hanya mencetak nama suite (tidak menjalankan apa pun) dan exit 0', () => {
++  const r = run(['--list'], [suite('x:one', S.fail), suite('x:two', S.fail)]);
++  assert.equal(r.status, 0, r.out);
++  assert.deepEqual(r.out.trim().split('\n'), ['x:one', 'x:two']);
++});
++
++test('--verbose menampilkan output suite yang lulus; tanpa itu hanya suite gagal yang ditampilkan', () => {
++  const suites = [suite('t:pass', S.pass)];
++  assert.match(run(['--verbose'], suites).out, /\| {3}PASS {2}a/);
++  assert.ok(!/\| {3}PASS {2}a/.test(run([], suites).out));
++});
++
++test('pemakaian salah → exit 2 dengan pesan dan bantuan; --help → exit 0', () => {
++  for (const args of [['--bogus'], ['--only'], ['--timeout', 'abc'], ['--timeout', '0'], ['--suites']]) {
++    const r = run(args);
++    assert.equal(r.status, 2, `${args.join(' ')}\n${r.out}`);
++    assert.match(r.out, /Penggunaan:/);
++  }
++  const h = run(['--help']);
++  assert.equal(h.status, 0);
++  assert.match(h.out, /Penggunaan:/);
++  const bad = run(['--suites', path.join(tmp, 'nope.json')]);
++  assert.equal(bad.status, 2);
++  assert.match(bad.out, /tidak bisa membaca --suites/);
++});
++
++test('daftar bawaan: setiap berkas tes backend dan setiap folder tes frontend terdaftar di runner (tidak ada yang terlupa)', () => {
++  const src = fs.readFileSync(RUNNER, 'utf8');
++  const backend = fs.readdirSync(path.join(ROOT, 'backend/tests'), { withFileTypes: true }).filter((d) => d.isFile() && d.name.endsWith('.js')).map((d) => d.name);
++  assert.ok(backend.length >= 15, 'daftar tes backend tidak terbaca');
++  for (const f of backend) assert.ok(src.includes(`'${f}'`), `backend/tests/${f} belum terdaftar di scripts/run-tests.mjs`);
++  assert.ok(fs.existsSync(path.join(ROOT, 'backend/src/game/engine.test.js')) && src.includes('node_modules/jest/bin/jest.js'), 'Jest (engine.test.js) harus terdaftar');
++  const frontend = fs.readdirSync(path.join(ROOT, 'frontend/tests'), { withFileTypes: true }).filter((d) => d.isDirectory() && d.name !== 'browser').map((d) => d.name);
++  assert.ok(frontend.length >= 7, 'daftar tes frontend tidak terbaca');
++  for (const d of frontend) {
++    const sync = d === 'sync.sim' && src.includes("fe('sync'");
++    assert.ok(sync || src.includes(`'${d}'`) || src.includes(`tests/${d}/`), `frontend/tests/${d} belum terdaftar di scripts/run-tests.mjs`);
++  }
++});
++
++test('skrip npm: root "test", backend "test" dan frontend "test" memanggil runner; backend punya test:jest', () => {
++  const read = (p) => JSON.parse(fs.readFileSync(path.join(ROOT, p), 'utf8')).scripts;
++  assert.equal(read('package.json').test, 'node scripts/run-tests.mjs');
++  assert.equal(read('backend/package.json').test, 'node ../scripts/run-tests.mjs --only backend');
++  assert.equal(read('backend/package.json')['test:jest'], 'jest');
++  assert.equal(read('frontend/package.json').test, 'node ../scripts/run-tests.mjs --only frontend');
++});
++
++test('lari nyata kecil: dua suite backend sungguhan lewat runner → exit 0 dan hitungan sesuai', () => {
++  const r = run(['--only', 'backend:debug-log,backend:config-jwt']);
++  assert.equal(r.status, 0, r.out);
++  assert.match(r.out, /2 suite: 2 PASS, 0 FAIL, 0 SKIP/);
++  assert.match(line(r.out, 'backend:debug-log'), /10\/10/);
++  assert.match(line(r.out, 'backend:config-jwt'), /20\/20/);
++});
++
++// ── runner ───────────────────────────────────────────────────────────────────────────────────────────
++let failed = 0;
++for (const t of tests) {
++  try { t.fn(); console.log(`  PASS  ${t.name}`); } catch (e) {
++    failed += 1;
++    console.log(`  FAIL  ${t.name}\n        ${String(e.stack || e.message).split('\n').slice(0, 8).join('\n        ')}`);
++  }
++}
++fs.rmSync(tmp, { recursive: true, force: true });
++console.log(`\n${tests.length - failed}/${tests.length} lulus`);
++process.exit(failed ? 1 : 0);

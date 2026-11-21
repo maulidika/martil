@@ -2,7 +2,7 @@
 /**
  * Helper bersama untuk simulasi multiplayer (Socket.IO tiruan di memori).
  * Menjalankan socketHandler.js, roomManager.js, dan engine.js ASLI.
- * Di-stub: JWT (token = JSON), database (no-op), uuid (crypto.randomUUID).
+ * Di-stub: JWT (token = JSON) dan uuid (crypto.randomUUID). Database: SQLite ASLI di memori dengan skema produksi (helpers/memdb.js).
  * Waktu disimulasikan dengan menggeser Date.now(); jeda 5 detik antar-game dipercepat.
  */
 const assert = require('node:assert/strict');
@@ -17,7 +17,8 @@ function stub(rel, exports) {
   require.cache[file] = { id: file, filename: file, loaded: true, exports };
 }
 stub('auth/jwt.js', { verifyToken: (t) => JSON.parse(t), signToken: () => '' });
-stub('db/database.js', { db: () => ({ prepare: () => ({ run() {}, get() {}, all() { return []; } }), exec() {} }) });
+const memdb = require('./memdb');
+stub('db/database.js', { db: () => memdb.handle() });
 const origLoad = Module._load;
 Module._load = function (request, ...rest) {
   if (request === 'uuid') return { v4: () => crypto.randomUUID() };
@@ -86,6 +87,7 @@ class Client {
 // ── Helper skenario ──────────────────────────────────────────────────────────
 let seq = 0;
 function setup() {
+  memdb.fresh();                                   // every scenario starts with an empty real database
   const io = new FakeIO();
   const handle = registerSocketHandlers(io, { sweepIntervalMs: 0 });
   return { io, handle };
@@ -133,7 +135,13 @@ async function runTests(tests) {
   let failed = 0;
   for (const { name, fn } of tests) {
     resetClock();
-    try { await fn(); realLog(`  PASS  ${name}`); }
+    memdb.takeErrors();
+    try {
+      await fn();
+      const dbErrors = memdb.takeErrors();
+      if (dbErrors.length) throw new Error(`error SQL tertelan oleh server selama skenario:\n  ${dbErrors.join('\n  ')}`);
+      realLog(`  PASS  ${name}`);
+    }
     catch (e) { failed += 1; realLog(`  FAIL  ${name}\n        ${String(e.stack || e.message).split('\n').slice(0, 6).join('\n        ')}`); }
   }
   console.info = realInfo;
@@ -143,6 +151,6 @@ async function runTests(tests) {
 const resetClock = () => { offsetMs = 0; };
 
 module.exports = {
-  assert, rm, FakeIO, Client, setup, newRoom, uid, player, handIds,
+  assert, rm, FakeIO, Client, setup, memdb, newRoom, uid, player, handIds,
   advance, resetClock, playSetToEnd, runTests, tick, realLog,
 };

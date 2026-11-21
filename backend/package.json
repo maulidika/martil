@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
-    "test": "jest",
+    "test": "node ../scripts/run-tests.mjs --only backend",
+    "test:jest": "jest",
     "test:sim": "node tests/reconnect.sim.js",
     "test:combo": "node tests/combo.consistency.js",
     "test:nav": "node tests/room-navigation.sim.js",
@@ -21,7 +22,8 @@
     "test:hostkeep": "node tests/host-retention.sim.js",
     "test:config": "node tests/config-jwt.sim.js",
     "test:debuglog": "node tests/debug-log.sim.js",
-    "test:db": "node tests/db-schema.sim.js"
+    "test:db": "node tests/db-schema.sim.js",
+    "test:persistence": "node tests/db-persistence.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
