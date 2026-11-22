@@ -23,7 +23,8 @@
     "test:config": "node tests/config-jwt.sim.js",
     "test:debuglog": "node tests/debug-log.sim.js",
     "test:db": "node tests/db-schema.sim.js",
-    "test:persistence": "node tests/db-persistence.sim.js"
+    "test:persistence": "node tests/db-persistence.sim.js",
+    "test:codecase": "node tests/room-code-case.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

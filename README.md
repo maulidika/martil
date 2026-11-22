@@ -96,7 +96,7 @@ martil-main/
 │
 ├── backend/
 │   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config, test:debuglog, test:db, test:persistence, test:jest
+│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config, test:debuglog, test:db, test:persistence, test:codecase, test:jest
 │   ├── .env.example             ← contoh konfigurasi (hanya placeholder; salin menjadi .env)
 │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
 │   ├── src/
@@ -119,7 +119,7 @@ martil-main/
 │       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
 │       ├── helpers/memdb.js     ← SQLite asli di memori (skema produksi) untuk suite simulasi; mencatat error SQL yang tertelan handler
 │       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js, debug-log.sim.js, db-schema.sim.js, db-persistence.sim.js
+│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js, debug-log.sim.js, db-schema.sim.js, db-persistence.sim.js, room-code-case.sim.js
 │       └── combo.consistency.js ← cek aturan kombinasi server vs klien
 │
 └── frontend/
@@ -331,6 +331,8 @@ Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kar
 
 **Payload.** Setiap handler membaca payload lewat guard (`socket/payload.js`): payload harus berupa objek, dan `roomCode` / `targetId`, bila ada, harus string maksimal 64 karakter. Bentuk yang salah dijawab `INVALID_PAYLOAD` pada kanal yang sama dengan penolakan event itu: `leave_room_error` + `error` untuk `leave_room`, `return_room_error` + `error` untuk `return_to_room`, `kick_error` untuk `kick_player`, dan `error` untuk event lain. Field yang tidak dikirim tetap memakai kode lama (`NOT_IN_ROOM`, `ROOM_NOT_FOUND`). `create_room` tanpa payload tetap diterima. `maxGames` pada `create_room` harus tepat angka 3, 4, atau 5 (string seperti `"4"`, pecahan, `NaN`, `null`, dan nilai lain ditolak `INVALID_MAX_GAMES` tanpa membuat Room dan tanpa mengubah state apa pun). Exception tak terduga di handler ditangkap, dicatat dengan stack di log server, dan pengirim menerima `INTERNAL_ERROR`; server tetap berjalan.
 
+**Kode Room.** Semua event yang membawa `roomCode` (`join_room`, `leave_room`, `return_to_room`, `kick_player`, `start_game`, `play_cards`, `skip_turn`) menerima huruf besar, kecil, atau campuran: server mengubahnya ke huruf besar lewat `normalizeRoomCode` (`socket/payload.js`) sebelum dipakai, sehingga kode yang dikirim balik oleh server dan nama room Socket.IO selalu huruf besar. Spasi di sekitar kode tidak dipangkas (kode dengan spasi tidak cocok dengan Room mana pun). Kode kosong atau tidak ada dijawab seperti kode yang tidak dikenal. (Sebelumnya hanya `leave_room`, `return_to_room`, dan `kick_player` yang melakukan ini.) Kolom input di `LobbyPage` tetap mengubah ketikan ke huruf besar.
+
 **`cardIds` pada `play_cards`.** Harus berupa array berisi id kartu yang sah (mis. `3D`, `10H`, `2S`), tanpa duplikat, paling banyak 13. Selain itu dijawab `INVALID_CARD_IDS`; tidak ada kartu dikirim tetap `NO_CARDS_SELECTED`. Urutan pemeriksaan engine: `GAME_NOT_ACTIVE`, `NOT_YOUR_TURN`, validasi bentuk `cardIds`, `CARD_NOT_IN_HAND`, lalu aturan kombinasi (`INVALID_COMBO`, `CANNOT_BEAT_TABLE`). Aturan permainan tidak berubah.
 
 **Timer giliran.** `play_cards` dan `skip_turn` divalidasi dulu; timer hanya diganti setelah aksi diterima. Aksi yang ditolak (dari siapa pun) tidak mengubah timer.
@@ -404,6 +406,7 @@ npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepa
 npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
 npm run test:profiles  # profil publik: nama di setiap state Room, daftar putih field, pembersihan username, pembekuan nama di hasil set
 npm run test:hostkeep  # Host dipertahankan selama masa tunggu 60 dtk, dikembalikan bila kursi dipertahankan, alasan di event host_changed
+npm run test:codecase  # kode Room tidak peka huruf besar/kecil di semua event berkode (join, start, play, skip, leave, return, kick); siaran dan room Socket.IO selalu UPPER
 npm run test:persistence  # apa yang ditulis server ke DB selama alur Room/set (rooms, sets, games, game_scores), jumlah skor DB = memori; juga menguji pencatat error SQL harness
 npm run test:db  # skema DB berversi, migrasi (naik, gagal, versi lebih baru), penutupan Room basi, boot fail-fast; memakai SQLite asli di :memory:/folder sementara
 npm run test:debuglog  # log [rally-debug] hanya aktif dengan MARTIL_DEBUG=1/true, isi log tidak berubah, hasil engine identik dengan/tanpa flag

@@ -3,7 +3,7 @@
 const { verifyToken } = require('../auth/jwt');
 const rm = require('../rooms/roomManager');
 const { TURN_TIMEOUT_MS } = require('../game/engine');
-const { readPayload, emitRejection } = require('./payload');
+const { readPayload, emitRejection, normalizeRoomCode } = require('./payload');
 
 const timers = new Map(); // roomCode → timeoutHandle
 
@@ -67,7 +67,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     onSafe(socket, 'join_room', (data) => {
       const payload = readPayload(data, ['roomCode']);
       if (!payload) return emitRejection(socket, 'join_room', 'INVALID_PAYLOAD');
-      const { roomCode } = payload;
+      const roomCode = normalizeRoomCode(payload.roomCode);
       const room = rm.getRoom(roomCode);
       if (!room) return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
 
@@ -101,7 +101,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       const payload = readPayload(data, ['roomCode']);
       if (!payload) return emitRejection(socket, 'leave_room', 'INVALID_PAYLOAD');
       const { roomCode } = payload;
-      const code = String(roomCode || '').toUpperCase();
+      const code = normalizeRoomCode(roomCode);
       debugLog('LEAVE_ROOM_REQUEST', { userId, roomCode: code });
       // Pemain yang di-Kick dari Result: kembali ke Homepage mengakhiri pembatasan.
       const restriction = rm.getRestriction(userId);
@@ -141,7 +141,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       const payload = readPayload(data, ['roomCode']);
       if (!payload) return emitRejection(socket, 'return_to_room', 'INVALID_PAYLOAD');
       const { roomCode } = payload;
-      const code = String(roomCode || '').toUpperCase();
+      const code = normalizeRoomCode(roomCode);
       debugLog('RETURN_TO_ROOM_REQUEST', { userId, roomCode: code });
       if (rm.getRestriction(userId)) {   // di-Kick dari Result: tidak boleh kembali ke Room sebelum ke Homepage
         debugLog('RETURN_TO_ROOM_REJECTED', { userId, roomCode: code, reason: 'KICKED_FROM_ROOM' });
@@ -174,7 +174,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       const payload = readPayload(data, ['roomCode', 'targetId']);
       if (!payload) return emitRejection(socket, 'kick_player', 'INVALID_PAYLOAD');
       const { roomCode, targetId } = payload;
-      const code = String(roomCode || '').toUpperCase();
+      const code = normalizeRoomCode(roomCode);
       const target = String(targetId || '');
       if (!socket.rooms.has(code)) return socket.emit('kick_error', { code: 'NOT_IN_ROOM' });
       const result = rm.kickPlayer(code, userId, target);
@@ -198,7 +198,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     onSafe(socket, 'start_game', (data) => {
       const payload = readPayload(data, ['roomCode']);
       if (!payload) return emitRejection(socket, 'start_game', 'INVALID_PAYLOAD');
-      const { roomCode } = payload;
+      const roomCode = normalizeRoomCode(payload.roomCode);
       if (!requireInRoom(socket, roomCode)) return;
       const room = rm.getRoom(roomCode);
       if (!room)                   return socket.emit('error', { code: 'ROOM_NOT_FOUND' });
@@ -220,7 +220,8 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     onSafe(socket, 'play_cards', (data) => {
       const payload = readPayload(data, ['roomCode']);
       if (!payload) return emitRejection(socket, 'play_cards', 'INVALID_PAYLOAD');
-      const { roomCode, cardIds } = payload;   // cardIds: shape is validated by the engine (game/cardIds.js)
+      const roomCode = normalizeRoomCode(payload.roomCode);
+      const { cardIds } = payload;   // cardIds: shape is validated by the engine (game/cardIds.js)
       if (!requireInRoom(socket, roomCode)) return;
 
       // Validate first: a rejected action must leave the turn timer exactly as it was.
@@ -244,7 +245,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     onSafe(socket, 'skip_turn', (data) => {
       const payload = readPayload(data, ['roomCode']);
       if (!payload) return emitRejection(socket, 'skip_turn', 'INVALID_PAYLOAD');
-      const { roomCode } = payload;
+      const roomCode = normalizeRoomCode(payload.roomCode);
       if (!requireInRoom(socket, roomCode)) return;
 
       // Validate first: a rejected action must leave the turn timer exactly as it was.

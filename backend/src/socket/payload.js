@@ -51,4 +51,12 @@ function emitRejection(socket, event, code) {
   }
 }
 
-module.exports = { readPayload, emitRejection, MAX_STRING_LEN, ERROR_CHANNELS };
+/**
+ * Room codes are generated in upper case, so every event that carries one accepts any case ("abc123" = "ABC123").
+ * Missing or empty input becomes '' (never matches a Room). Deliberately no trimming: same rule the older events used.
+ */
+function normalizeRoomCode(value) {
+  return String(value || '').toUpperCase();
+}
+
+module.exports = { readPayload, emitRejection, normalizeRoomCode, MAX_STRING_LEN, ERROR_CHANNELS };
