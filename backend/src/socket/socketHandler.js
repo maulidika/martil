@@ -2,7 +2,7 @@
 
 const { verifyToken } = require('../auth/jwt');
 const rm = require('../rooms/roomManager');
-const { TURN_TIMEOUT_MS } = require('../game/engine');
+const { TURN_TIMEOUT_MS } = require('../constants');
 const { readPayload, emitRejection, normalizeRoomCode } = require('./payload');
 
 const timers = new Map(); // roomCode → timeoutHandle

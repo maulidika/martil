@@ -4,7 +4,7 @@ Satu-satunya file status kerja. Diperbarui di setiap tahap (lewat patch docs yan
 
 ## Cap pembaruan
 
-**Pembaruan terakhir:** tahap D1 (perapian dokumentasi), 2026-11-22, patch terakhir d1-0002
+**Pembaruan terakhir:** tahap S3 (konstanta bersama sisi backend), 2026-11-23, patch terakhir s3-0003
 
 ## Cara memakai file ini
 
@@ -44,9 +44,9 @@ Kecuali saya minta eksplisit: jangan ubah aturan permainan, sistem giliran, Comb
 
 ## Posisi saat ini
 
-Sudah diterapkan di ZIP terbaru: patch 0001-0011, h6-0001/0002, h7-0001/0002, h7fix-0001..0006, s1-0001..0003, a1-0001..0004, h8-0001/0002, r3-0001/0002, r3fix-0001, s8-0001/0002, s9-0001/0002.
+Sudah diterapkan di ZIP terbaru: patch 0001-0011, h6-0001/0002, h7-0001/0002, h7fix-0001..0006, s1-0001..0003, a1-0001..0004, h8-0001/0002, r3-0001/0002, r3fix-0001, s8-0001/0002, s9-0001/0002, s2-0001/0002, d1-0001/0002.
 
-Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): s2-0001/0002 (kode Room tidak peka huruf besar/kecil), d1-0001/0002 (perapian dokumentasi: README, HANDOFF.md, tes `tools:docs`).
+Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): s3-0001/0002/0003 (konstanta Room/game satu definisi di backend + penjaga drift frontend; s3-0003 menyelaraskan status S2 dan D1 di HANDOFF.md).
 
 | Item | Status |
 |---|---|
@@ -57,9 +57,10 @@ Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): 
 | S1 helper nama pemain | SELESAI |
 | S8 skema DB berversi + `bootDatabase()` menutup Room basi saat start | SELESAI |
 | S9 `npm test` terpadu + harness SQLite asli di memori + `db-persistence.sim.js` | SELESAI |
-| S2 normalisasi kode Room (semua event berkode menerima huruf besar/kecil) | dikirim, menunggu verifikasi |
-| D1 perapian dokumentasi (satu README utama, satu HANDOFF.md, tes `tools:docs`) | dikirim, menunggu verifikasi |
-| S3 konstanta bersama (4 pemain, panjang kode, pilihan game; frontend dan backend) | belum |
+| S2 normalisasi kode Room (semua event berkode menerima huruf besar/kecil) | SELESAI |
+| D1 perapian dokumentasi (satu README utama, satu HANDOFF.md, tes `tools:docs`) | SELESAI |
+| S3 konstanta bersama: backend satu definisi (`backend/src/constants.js`), frontend dijaga tes (tidak diubah) | dikirim, menunggu verifikasi |
+| S3b frontend memakai satu modul konstanta (menggantikan literal; butuh ubah enam harness tes frontend yang membangun berkas satu per satu) | belum |
 | S4 kurangi state ganda di store (`currentTurn`, `roomCode`, `roomInfo.game` vs `gameState`, events sebagai bus) | belum |
 | S5 pecah LobbyPage jadi HomeView dan RoomView (route tetap `/lobby`) | belum |
 | S6 pisahkan tanggung jawab backend bertahap (timer, akses DB, payload) | belum |
@@ -95,6 +96,7 @@ Catatan teknis untuk C-E dan username: migrasi skema tinggal menambah fungsi bar
 - Saat boot, Room `waiting`/`playing` di DB menjadi `closed` (tanpa status baru); Room `done` dan `sets.ended_at` dibiarkan. DB dengan versi skema lebih baru dari kode menghentikan server (exit 1, satu baris `[db] FATAL: ...`).
 - `npm test` di root adalah runner terpadu (backend `npm test` = suite backend; Jest sendiri lewat `npm run test:jest`). Suite berbasis bash dijalankan lewat bash bila ada (atau `MARTIL_BASH`), selain itu SKIP dengan pesan jelas; porting ke Node ditunda. SKIP tidak membuat exit code gagal kecuali `--strict`.
 - Semua event Socket.IO yang membawa `roomCode` menerima huruf besar/kecil (di-uppercase tanpa trim); frontend tidak diubah.
+- Konstanta Room/game (4 pemain, kode 6 karakter, pilihan game 3/4/5 dengan default 4, timer giliran 30 dtk) didefinisikan sekali di `backend/src/constants.js`; nama kode error `NEED_4_PLAYERS` tetap (bagian protokol klien). Frontend belum memakai modul bersama (harness tesnya membangun berkas satu per satu): `backend/tests/constants.sim.js` membaca literal di `frontend/src` dan gagal bila berbeda dari backend atau polanya hilang. Aturan validasi kode di UI Join (`code.length < 4`) sengaja tidak diubah.
 - Dokumentasi: README utama, satu HANDOFF.md, folder `Patch/` tidak disentuh sebelum R4, `frontend/tests/browser/README.md` dipertahankan.
 
 ## Belum diputuskan
@@ -110,17 +112,17 @@ Sudah dilaporkan, BELUM dikerjakan; tunggu keputusan saya:
 - `auth/routes.js` (login, register, me) belum punya tes sama sekali (butuh express/bcryptjs; kandidat R5).
 - Tabel `room_players` dibuat tetapi tidak dipakai server.
 - State Room hidup di memori dan hilang saat server restart (fase sebelum online).
-- Validasi join di frontend memakai `code.length < 4`, tidak konsisten dengan kode Room 6 karakter (bagian S3).
+- Validasi join di frontend memakai `code.length < 4`, tidak konsisten dengan kode Room 6 karakter. Mengubahnya mengubah perilaku UI (pesan lokal vs `ROOM_NOT_FOUND` dari server), jadi menunggu keputusan saya; kandidat S3b.
 - Folder `Patch/` tidak lengkap (berhenti di s1) dan riwayat sebenarnya ada di git: pindahkan ke luar repo atau hapus (keputusan di R4).
 
 ## Baseline tes
 
-Satu perintah dari root: `npm test`. Angka yang diharapkan setelah d1:
+Satu perintah dari root: `npm test`. Angka yang diharapkan setelah s3:
 
-- Sandbox: 27 suite, 26 PASS + 1 SKIP (`backend:jest`), 447 tes terhitung.
-- Komputer saya (dengan `npm install` dan bash): tanpa SKIP; `backend:config-jwt` 21 (satu tes round trip `jsonwebtoken` asli ikut jalan) dan Jest 3, jadi sekitar 451.
+- Sandbox: 28 suite, 27 PASS + 1 SKIP (`backend:jest`), 463 tes terhitung.
+- Komputer saya (dengan `npm install` dan bash): tanpa SKIP; `backend:config-jwt` 21 (satu tes round trip `jsonwebtoken` asli ikut jalan) dan Jest 3, jadi sekitar 467.
 
-Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tanpa hitungan), card-ids 16, payload-guards 10, turn-timer 8, intermission 12, max-games 9, single-room 14, profiles 16, host-retention 20, config-jwt 20 (+1 di komputer saya), debug-log 10, db-schema 20, db-persistence 12, room-code-case 12, Jest 3 (`engine.test.js`). Frontend: sync 37, server-errors 8, player-names 12, combo-ui 48 + 26 (render) = 74, kick-ui 5 + 16 (render) = 21, lobby-ui 10 (render), game-ui 17. Alat: `tools:runner` 20, `tools:docs` 13.
+Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tanpa hitungan), card-ids 16, payload-guards 10, turn-timer 8, intermission 12, max-games 9, single-room 14, profiles 16, host-retention 20, config-jwt 20 (+1 di komputer saya), debug-log 10, db-schema 20, db-persistence 12, room-code-case 12, constants 16, Jest 3 (`engine.test.js`). Frontend: sync 37, server-errors 8, player-names 12, combo-ui 48 + 26 (render) = 74, kick-ui 5 + 16 (render) = 21, lobby-ui 10 (render), game-ui 17. Alat: `tools:runner` 20, `tools:docs` 13.
 
 `npm test -- --strict` menganggap SKIP sebagai gagal.
 
@@ -128,4 +130,4 @@ Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tan
 
 Mulai dengan: (1) baca `HANDOFF.md`, `README.md`, dan kode di ZIP, (2) jalankan `npm test` dan cocokkan dengan Baseline tes, (3) usulkan item berikutnya dengan audit read-only singkat dan tunggu persetujuan saya sebelum mengubah kode.
 
-Kandidat tanpa keputusan aturan: S3 (konstanta bersama; menyentuh backend dan frontend), username case-insensitive (butuh keputusan data lama), R1/R2. Wallet (C-E) menunggu keputusan peringkat seri dan set yang tidak selesai: jangan diasumsikan, tanyakan.
+Kandidat tanpa keputusan aturan: S3b (frontend memakai modul konstanta bersama), username case-insensitive (butuh keputusan data lama), R1/R2. Wallet (C-E) menunggu keputusan peringkat seri dan set yang tidak selesai: jangan diasumsikan, tanyakan.

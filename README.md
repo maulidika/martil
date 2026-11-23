@@ -106,6 +106,7 @@ martil-main/
 │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
 │   ├── src/
 │   │   ├── server.js            ← entry point Express + Socket.IO
+│   │   ├── constants.js         ← konstanta Room/game: jumlah pemain, panjang kode, pilihan game per set, timer giliran (satu definisi di backend; frontend mengulang beberapa nilainya dan tes `constants` menjaga agar tidak berbeda)
 │   │   ├── auth/
 │   │   │   ├── jwt.js           ← sign/verify JWT + pemilihan secret (server menolak start di production bila JWT_SECRET kosong)
 │   │   │   └── routes.js        ← POST /api/auth/register, /login; GET /api/auth/me
@@ -400,7 +401,7 @@ Runner menjalankan suite satu per satu dan hanya menampilkan output suite yang g
 | Area | Contoh yang diuji |
 |---|---|
 | Room dan protokol Socket.IO | resume dan reconnect, Host dan Kick, navigasi Room, satu akun satu Room, validasi payload dan `cardIds`, timer giliran, jeda antar-game, jumlah game per set, kode Room |
-| Aturan permainan | konsistensi kombinasi server vs klien, perilaku rally/skip di engine |
+| Aturan permainan | konsistensi kombinasi server vs klien, perilaku rally/skip di engine, konstanta Room/game dan kesesuaiannya dengan nilai di frontend |
 | Database dan konfigurasi | skema berversi dan migrasi, apa yang ditulis ke DB selama set, penutupan Room basi, `JWT_SECRET`, log debug |
 | Frontend | state koneksi klien, layout dan posisi kursi, Combo Detector dan Group Chain, Kick, Homepage/Room, pesan error server, nama pemain |
 | Dokumentasi dan alat | runner tes itu sendiri, aturan dokumentasi (berkas `.md` yang diizinkan, tautan, variabel env) |

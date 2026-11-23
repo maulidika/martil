@@ -1,7 +1,8 @@
 'use strict';
 
 const { v4: uuidv4 } = require('uuid');
-const { GameEngine, TURN_TIMEOUT_MS } = require('../game/engine');
+const { GameEngine } = require('../game/engine');
+const { PLAYERS_PER_ROOM, ROOM_CODE_LENGTH, ALLOWED_MAX_GAMES, DEFAULT_MAX_GAMES } = require('../constants');
 const { calcSetRankings } = require('../game/scorer');
 const { db } = require('../db/database');
 
@@ -62,16 +63,10 @@ function roomOfPlayer(userId, exceptCode = null) {
   return null;
 }
 
-/**
- * Games per set a Room can be created with. A strict number match: strings ("4"), floats, NaN, null, etc. are rejected.
- * Keep in sync with MAX_GAMES_OPTIONS in frontend/src/pages/LobbyPage.jsx.
- */
-const ALLOWED_MAX_GAMES = Object.freeze([3, 4, 5]);
-const DEFAULT_MAX_GAMES = 4;
-
 function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES, username) {
   if (restrictions.has(hostId)) return { ok: false, error: 'KICKED_FROM_ROOM' };
   // Validate before touching any state (a rejected request must not clear a KICKED removal record).
+  // Strict number match: strings ("4"), floats, NaN, null, etc. are rejected. Choices: constants.js (the frontend repeats them).
   if (!ALLOWED_MAX_GAMES.includes(maxGames)) return { ok: false, error: 'INVALID_MAX_GAMES' };
   if (roomOfPlayer(hostId))                   return { ok: false, error: 'ALREADY_IN_OTHER_ROOM' };
   if (removals.get(hostId)?.reason === 'KICKED') removals.delete(hostId);
@@ -113,7 +108,7 @@ function joinRoom(code, playerId, username) {
   // One Room per account. Checked before anything below so a rejected join changes nothing (no reset of a finished Room).
   if (roomOfPlayer(playerId, code))                return { ok: false, error: 'ALREADY_IN_OTHER_ROOM' };
   if (room.status === 'playing')                   return { ok: false, error: 'GAME_ALREADY_STARTED' };
-  if (room.players.length >= 4)                    return { ok: false, error: 'ROOM_FULL' };
+  if (room.players.length >= PLAYERS_PER_ROOM)     return { ok: false, error: 'ROOM_FULL' };
   if (room.players.find(p => p.id === playerId))   return { ok: false, error: 'ALREADY_IN_ROOM' };
 
   // Room yang set-nya sudah selesai tetap bisa dimasuki pemain baru (kursi kosong setelah
@@ -152,7 +147,7 @@ function getRoom(code) {
 function startSet(code) {
   const room = rooms.get(code);
   if (!room)                       return { ok: false, error: 'ROOM_NOT_FOUND' };
-  if (room.players.length !== 4)   return { ok: false, error: 'NEED_4_PLAYERS' };
+  if (room.players.length !== PLAYERS_PER_ROOM)   return { ok: false, error: 'NEED_4_PLAYERS' };
   if (room.status !== 'waiting')   return { ok: false, error: 'ALREADY_STARTED' };
   if (room.players.some(p => p.inRoom === false)) return { ok: false, error: 'PLAYERS_NOT_READY' };
 
@@ -631,7 +626,7 @@ function generateCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code;
   do {
-    code = Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    code = Array.from({ length: ROOM_CODE_LENGTH }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
   } while (rooms.has(code));
   return code;
 }

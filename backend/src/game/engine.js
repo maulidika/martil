@@ -5,7 +5,7 @@ const { detectCombo, canBeat, cardsInHand } = require('./validator');
 const { calcGameScores } = require('./scorer');
 const { validateCardIds } = require('./cardIds');
 
-const TURN_TIMEOUT_MS = 30_000;
+const { TURN_TIMEOUT_MS } = require('../constants');
 
 // Rally debug logging: OFF by default. Enable with MARTIL_DEBUG=1 (or "true"). Read at call time (not at load)
 // so it can be toggled without reloading the module; `build` runs only when enabled.

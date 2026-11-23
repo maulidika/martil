@@ -61,8 +61,9 @@ t('nama properti bawaan Object tidak dianggap kode (toString, constructor, __pro
 })
 
 t('pesan INVALID_MAX_GAMES menyebut persis nilai yang diizinkan server', () => {
-  const rm = fs.readFileSync(path.join(BACKEND, 'rooms/roomManager.js'), 'utf8')
-  const allowed = rm.match(/ALLOWED_MAX_GAMES = Object\.freeze\(\[([^\]]+)\]\)/)[1].split(',').map(s => s.trim())
+  // The allowed choices live in backend/src/constants.js (moved there from roomManager.js in S3).
+  const constants = fs.readFileSync(path.join(BACKEND, 'constants.js'), 'utf8')
+  const allowed = constants.match(/ALLOWED_MAX_GAMES: Object\.freeze\(\[([^\]]+)\]\)/)[1].split(',').map(s => s.trim())
   const msg = messageForServerError('INVALID_MAX_GAMES')
   for (const n of allowed) assert.ok(msg.includes(n), `pesan tidak menyebut ${n}`)
   assert.ok(!/\b6\b/.test(msg))
