@@ -2,9 +2,11 @@
 
 Martil adalah game kartu multiplayer online untuk **tepat 4 pemain**, berbasis house rules (bukan varian standar mana pun). Pemain membuat atau bergabung ke Room, memainkan satu *set* yang terdiri dari beberapa game, lalu melihat peringkat akhir. Komunikasi real-time lewat Socket.IO, tampilan mobile-first.
 
-Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber kebenaran, tahan refresh dan putus koneksi). Saat ini belum ada uang, saldo, atau taruhan apa pun yang aktif — lihat bagian [Belum tersedia](#-belum-tersedia--placeholder) dan [Roadmap](#-roadmap-rencana--belum-diimplementasikan).
+Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber kebenaran, tahan refresh dan putus koneksi). Saat ini belum ada uang, saldo, atau taruhan apa pun yang aktif — lihat [Keterbatasan dan Rencana](#-keterbatasan-dan-rencana).
 
 > Dokumen ini ditulis dari kondisi kode yang diperiksa langsung. Bila ada yang berbeda dengan kode, kodelah yang benar — mohon perbarui README.
+>
+> Status kerja pengembangan (keputusan, backlog, temuan terbuka, baseline tes) dicatat di [HANDOFF.md](HANDOFF.md), bukan di sini.
 
 ---
 
@@ -23,10 +25,14 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
 | Satu akun hanya boleh menjadi anggota satu Room pada satu waktu (validasi server) | ✅ Tersedia |
 | Nama asli (username) pemain tampil di Room, Game, dan Result (bukan ID acak) | ✅ Tersedia |
 | Pesan error server tampil di UI dalam bahasa Indonesia (Homepage, Room, Game, Result) | ✅ Tersedia |
-| Nama pemain asli untuk lawan, avatar, level | ⏳ Placeholder (lihat di bawah) |
+| Avatar dan level pemain | ⏳ Placeholder (lihat [Keterbatasan dan Rencana](#-keterbatasan-dan-rencana)) |
 | Wallet / saldo virtual, validasi saldo Room | ❌ Belum ada (rencana) |
 | Posisi kursi berlawanan arah jarum jam (kanan, atas, kiri menurut urutan bergabung) | ✅ Tersedia |
 | Host dipertahankan selama masa tunggu reconnect 60 detik dan dikembalikan bila kursinya dipertahankan | ✅ Tersedia |
+| Kode Room tidak peka huruf besar/kecil di semua event Socket.IO | ✅ Tersedia |
+| Skema database berversi; Room yang tersisa dari proses sebelumnya ditutup saat server start | ✅ Tersedia |
+| Konfigurasi aman: `JWT_SECRET` wajib di production (server menolak start tanpa itu); log debug engine opsional | ✅ Tersedia |
+| Satu perintah `npm test` untuk semua suite backend dan frontend | ✅ Tersedia |
 
 ---
 
@@ -80,7 +86,7 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 | State | Zustand 4 |
 | Routing | react-router-dom 6 |
 | Real-time | socket.io-client 4 |
-| Test | Skrip simulasi Node (tanpa framework) + Jest untuk `engine.test.js` + skrip bash untuk frontend |
+| Test | Runner `npm test` (Node) + skrip simulasi tanpa framework + Jest untuk `engine.test.js` + skrip bash untuk sebagian tes frontend |
 
 ---
 
@@ -88,15 +94,14 @@ cd frontend && npm install && npm run dev     # http://localhost:5173
 
 ```
 martil-main/
-├── package.json                 ← skrip root (install:all, dev, dev:backend, dev:frontend, build, test, test:backend, test:frontend)
-├── scripts/
-│   ├── run-tests.mjs            ← runner tes terpadu (`npm test`): menjalankan semua suite backend dan frontend
-│   └── run-tests.test.mjs       ← tes untuk runner itu sendiri
+├── README.md                    ← dokumentasi utama (dokumen ini)
+├── HANDOFF.md                   ← status kerja, keputusan, dan backlog; diperbarui setiap tahap
+├── package.json                 ← skrip root (install:all, dev, build, test, ...)
+├── scripts/                     ← run-tests.mjs (runner `npm test`) dan tes untuk runner dan dokumentasi
 ├── Patch/                       ← arsip patch lama (riwayat perubahan; tidak dipakai saat menjalankan proyek)
 │
 ├── backend/
-│   ├── package.json             ← skrip: start, dev, test, test:sim, test:nav, test:kick, test:combo,
-│   │                              test:cardids, test:payload, test:timer, test:intermission, test:maxgames, test:singleroom, test:profiles, test:hostkeep, test:config, test:debuglog, test:db, test:persistence, test:codecase, test:jest
+│   ├── package.json             ← skrip start, dev, test, dan test:<suite> untuk satu suite
 │   ├── .env.example             ← contoh konfigurasi (hanya placeholder; salin menjadi .env)
 │   ├── data/                    ← martil.db (SQLite, dibuat otomatis)
 │   ├── src/
@@ -114,17 +119,13 @@ martil-main/
 │   │   │   └── engine.test.js   ← uji Jest untuk perilaku rally/skip
 │   │   ├── rooms/roomManager.js ← Room, set, game, reconnect, Kick (state di memori)
 │   │   ├── socket/socketHandler.js ← semua event Socket.IO, timer giliran, sweeper
-│   │   └── socket/payload.js    ← guard bentuk payload event Socket.IO
-│   └── tests/
-│       ├── helpers/sim.js       ← Socket.IO tiruan + jam simulasi untuk uji
-│       ├── helpers/memdb.js     ← SQLite asli di memori (skema produksi) untuk suite simulasi; mencatat error SQL yang tertelan handler
-│       ├── reconnect.sim.js, room-navigation.sim.js, kick.sim.js
-│       ├── card-ids.sim.js, payload-guards.sim.js, turn-timer.sim.js, intermission.sim.js, max-games.sim.js, single-room.sim.js, profiles.sim.js, host-retention.sim.js, config-jwt.sim.js, debug-log.sim.js, db-schema.sim.js, db-persistence.sim.js, room-code-case.sim.js
-│       └── combo.consistency.js ← cek aturan kombinasi server vs klien
+│   │   └── socket/payload.js    ← guard bentuk payload event Socket.IO dan normalisasi kode Room
+│   └── tests/                   ← suite simulasi (`*.sim.js`) dan `combo.consistency.js`
+│       └── helpers/             ← sim.js (Socket.IO tiruan + jam simulasi), memdb.js (SQLite asli di memori)
 │
 └── frontend/
     ├── package.json, vite.config.js, index.html
-    ├── trace-sockets.js         ← skrip manual (butuh backend jalan; lihat bagian Test)
+    ├── trace-sockets.js         ← skrip manual (butuh backend jalan; lihat bagian Menjalankan Automated Test)
     ├── src/
     │   ├── main.jsx, App.jsx    ← entry dan routing
     │   ├── store/gameStore.js   ← Zustand: auth, koneksi, room, game, hasil set
@@ -134,8 +135,9 @@ martil-main/
     │   └── utils/               ← comboDetector, comboPicker, groupChain, handUi (logika tangan),
     │                              gameLayout (ukuran/posisi kursi), profile (nama pemain + data profil sementara), gameToast,
     │                              session, kick, serverErrors (pesan error server) (logika murni untuk UI)
-    └── tests/                   ← sync.sim, game-ui, combo-ui, kick-ui, lobby-ui, server-errors, player-names (bash/Node), browser (Playwright, opsional)
+    └── tests/                   ← satu folder per area (logika + render); browser/ = uji Chromium opsional
 ```
+Daftar lengkap suite tes: `npm test -- --list`.
 
 ---
 
@@ -279,7 +281,7 @@ Kombinasi harus sejenis dengan kartu teratas di meja (Single melawan Single, dst
 - Satu set = 3, 4, atau 5 game, dipilih pembuat Room (default 4). Homepage hanya menawarkan ketiga nilai itu, dan server menolak nilai lain (`INVALID_MAX_GAMES`). Skor tiap game dijumlahkan.
 - Poin total terkecil = Juara 1.
 - Bila poin total sama, urutan peringkat saat ini mengikuti urutan pemain di Room (belum ada aturan seri khusus).
-- Label `+5k / +3k / −3k / −5k` di halaman Result saat ini **hanya teks tampilan**; tidak ada saldo yang berubah (lihat Roadmap).
+- Label `+5k / +3k / −3k / −5k` di halaman Result saat ini **hanya teks tampilan**; tidak ada saldo yang berubah (lihat [Keterbatasan dan Rencana](#-keterbatasan-dan-rencana)).
 
 ---
 
@@ -382,7 +384,7 @@ Backend mencetak log berawalan `[MARTIL ...]` (mis. `SOCKET_CONNECTED`, `SESSION
 
 ## 🧪 Menjalankan Automated Test
 
-Semua uji di bawah berjalan **tanpa browser dan tanpa WebSocket asli**: server diuji lewat Socket.IO tiruan di memori, dengan **SQLite asli di memori** (skema yang sama dengan produksi, `helpers/memdb.js`), sehingga SQL di `roomManager.js` ikut teruji. Error SQL yang ditelan handler socket (`onSafe`) dicatat dan membuat skenario **gagal**. Yang masih di-stub hanya JWT dan uuid. `auth/routes.js` (login/register) belum punya tes.
+Semua uji berjalan **tanpa browser dan tanpa WebSocket asli**: server diuji lewat Socket.IO tiruan di memori, dengan **SQLite asli di memori** (skema sama dengan produksi, `backend/tests/helpers/memdb.js`), sehingga SQL di `roomManager.js` ikut teruji. Error SQL yang ditelan handler socket (`onSafe`) dicatat dan membuat skenario **gagal**. Yang masih di-stub hanya JWT dan uuid. `auth/routes.js` (login/register) belum punya tes.
 
 **Satu perintah untuk semua** (dari folder root; Node murni, jalan di Windows tanpa bash):
 ```bash
@@ -393,39 +395,18 @@ npm test -- --list               # daftar suite;  --verbose: tampilkan output se
 ```
 Runner menjalankan suite satu per satu dan hanya menampilkan output suite yang gagal. **SKIP bukan lulus**: suite yang dilewati selalu tampil di ringkasan beserta alasannya. Ada tiga penyebab SKIP: `backend:jest` bila Jest belum terpasang (`npm install` di `backend`), bagian render frontend bila `frontend/node_modules` belum ada, dan suite berbasis bash (`combo-ui`, `kick-ui`, `lobby-ui`, `game-ui`) bila bash tidak ditemukan. Di Windows, bila `bash` di PATH adalah WSL, tunjuk Git Bash: `$env:MARTIL_BASH = "C:\Program Files\Git\bin\bash.exe"`. `npm test` di folder `backend` atau `frontend` menjalankan hanya bagiannya (Jest sendiri: `npm run test:jest` di `backend`). Perintah `npm run test:<nama>` di bawah tetap bisa dipakai untuk satu suite.
 
-**Backend** (dari folder `backend`):
-```bash
-npm run test:sim     # protokol resume, timer, host, kadaluarsa
-npm run test:nav     # satu set penuh dimainkan bot, lalu Back to Room / Exit Room
-npm run test:kick    # Host Kick di Room dan di Result (sisi server)
-npm run test:cardids # validasi cardIds (duplikat, tipe salah, format) di engine dan lewat socket
-npm run test:payload # guard payload semua handler Socket.IO + jaring pengaman INTERNAL_ERROR
-npm run test:timer   # aksi ditolak tidak menyentuh timer giliran (spy setTimeout/clearTimeout)
-npm run test:intermission  # play/skip ditolak GAME_STARTING selama jeda antar-game
-npm run test:maxgames  # maxGames hanya 3/4/5; set 3, 4, dan 5 game selesai tepat waktunya
-npm run test:singleroom  # satu akun hanya di satu Room (create/join ditolak; bebas setelah leave/kick/kedaluwarsa; fuzz invarian)
-npm run test:profiles  # profil publik: nama di setiap state Room, daftar putih field, pembersihan username, pembekuan nama di hasil set
-npm run test:hostkeep  # Host dipertahankan selama masa tunggu 60 dtk, dikembalikan bila kursi dipertahankan, alasan di event host_changed
-npm run test:codecase  # kode Room tidak peka huruf besar/kecil di semua event berkode (join, start, play, skip, leave, return, kick); siaran dan room Socket.IO selalu UPPER
-npm run test:persistence  # apa yang ditulis server ke DB selama alur Room/set (rooms, sets, games, game_scores), jumlah skor DB = memori; juga menguji pencatat error SQL harness
-npm run test:db  # skema DB berversi, migrasi (naik, gagal, versi lebih baru), penutupan Room basi, boot fail-fast; memakai SQLite asli di :memory:/folder sementara
-npm run test:debuglog  # log [rally-debug] hanya aktif dengan MARTIL_DEBUG=1/true, isi log tidak berubah, hasil engine identik dengan/tanpa flag
-npm run test:config  # JWT_SECRET: fail-fast di production (exit 1, satu baris), satu warning di development, secret tidak pernah dicetak, urutan dotenv, .env.example
-npm run test:combo   # konsistensi aturan kombinasi server vs klien (±2,6 juta kombinasi)
-npm run test:jest    # Jest (butuh npm install): saat ini hanya src/game/engine.test.js
-npm test             # runner terpadu untuk semua suite di atas + Jest bila terpasang (lihat "Satu perintah untuk semua")
-```
+**Area yang diuji.** Nama semua suite: `npm test -- --list`. Apa yang diuji tiap suite dijelaskan di komentar header berkasnya.
 
-**Frontend** (dari folder `frontend`):
-```bash
-bash tests/sync.sim/run.sh    # state machine koneksi klien (socket, react, router palsu)
-bash tests/game-ui/run.sh     # layout, posisi kursi, profil sementara, format koin
-bash tests/combo-ui/run.sh    # Combo Detector + Group Chain; smoke test render GamePage
-bash tests/kick-ui/run.sh     # logika Kick (Room); render ResultPage (tanpa tombol Kick) dan LobbyPage
-bash tests/lobby-ui/run.sh    # render Homepage/Room: pilihan jumlah game per set 3, 4, 5 dan tampilan error server
-bash tests/server-errors/run.sh  # peta pesan error vs semua kode error yang bisa dikirim backend (tanpa browser)
-bash tests/player-names/run.sh   # nama pemain di UI: prioritas sumber nama, pesan toast, dan penjaga agar tidak ada pemotongan ID manual
-```
+| Area | Contoh yang diuji |
+|---|---|
+| Room dan protokol Socket.IO | resume dan reconnect, Host dan Kick, navigasi Room, satu akun satu Room, validasi payload dan `cardIds`, timer giliran, jeda antar-game, jumlah game per set, kode Room |
+| Aturan permainan | konsistensi kombinasi server vs klien, perilaku rally/skip di engine |
+| Database dan konfigurasi | skema berversi dan migrasi, apa yang ditulis ke DB selama set, penutupan Room basi, `JWT_SECRET`, log debug |
+| Frontend | state koneksi klien, layout dan posisi kursi, Combo Detector dan Group Chain, Kick, Homepage/Room, pesan error server, nama pemain |
+| Dokumentasi dan alat | runner tes itu sendiri, aturan dokumentasi (berkas `.md` yang diizinkan, tautan, variabel env) |
+
+**Satu suite saja.** `npm test -- --only <kata>`; atau langsung: `node tests/<berkas>` atau `npm run test:<nama>` (lihat `package.json`) di `backend`, dan `bash tests/<nama>/run.sh` di `frontend`.
+
 Bagian render pada `lobby-ui`, `combo-ui`, dan `kick-ui` memakai `react-dom/server`. JSX dikompilasi dengan esbuild yang dibawa Vite, jadi **TypeScript tidak dibutuhkan**. Bagian render dilewati (SKIP, exit 0, dengan pesan yang menyebut dependency yang kurang) hanya bila `frontend/node_modules` belum ada. Bila `node_modules` sudah ada tetapi react, react-dom, atau esbuild tidak ditemukan, test **GAGAL** (exit 1) agar tidak ada SKIP diam-diam; jalankan `npm install` di `frontend`.
 
 **Windows / tanpa bash.** Dua tes berikut berjalan hanya dengan Node, tanpa bash dan tanpa environment variable, dari folder mana pun: `npm run test:sync` (atau `node tests/sync.sim/main.mjs`), `npm run test:server-errors` (atau `node tests/server-errors/run.mjs`), dan `npm run test:names` (atau `node tests/player-names/run.mjs`). `node tests/lobby-ui/render.mjs` menjalankan render Homepage/Room, dan bagian render `kick-ui` dan `combo-ui` juga bisa dijalankan langsung (`node tests/kick-ui/render.mjs`, `node tests/combo-ui/render.mjs`). Skrip `run.sh` untuk `game-ui` dan bagian logika `kick-ui`/`combo-ui` masih membutuhkan bash (mis. Git Bash; `combo-ui` membuat symlink). `server-errors` membaca `backend/src` secara otomatis; variabel `BACKEND_SRC` bersifat opsional untuk menimpa lokasinya. `server-errors` mengimpor langsung file ES module `src/utils/serverErrors.js` tanpa `"type": "module"`, jadi bergantung pada deteksi sintaks module otomatis Node 22.x: terbukti jalan di v22.23.4 (sandbox) dan v22.23.1 (Windows, dilaporkan pengguna); versi Node lain belum diuji.
@@ -470,7 +451,9 @@ console.log(d.prepare('SELECT status, COUNT(*) AS n FROM rooms GROUP BY status')
 
 ---
 
-## ⏳ Belum Tersedia / Placeholder
+## ⏳ Keterbatasan dan Rencana
+
+### Belum tersedia
 
 - **Profil pemain (sebagian):** nama asli pemain sudah tampil (lihat Nama pemain di atas). Yang masih placeholder: level dan koin di meja adalah **data dummy** turunan hash ID (`frontend/src/utils/profile.js`), dan avatar masih siluet bawaan yang sama untuk semua pemain (hanya warna cincinnya yang berbeda). Username belum bisa diganti dan masih case-sensitive.
 - **Taruhan/nominal Room:** lencana taruhan di layar Game adalah placeholder; server belum punya data `bet`.
@@ -491,11 +474,9 @@ console.log(d.prepare('SELECT status, COUNT(*) AS n FROM rooms GROUP BY status')
 - [ ] Rate limiting (mis. `express-rate-limit`) pada login/register
 - [ ] Sajikan `frontend/dist/` lewat web server
 
----
+### Rencana fitur (roadmap)
 
-## 🗺️ Roadmap
-
-Bagian ini mendokumentasikan arah pengembangan. Poin A sudah selesai, B baru sebagian (nama pemain), dan **C, D, dan E belum ada di kode.**
+Spesifikasi arah pengembangan. Poin A sudah selesai, B baru sebagian (nama pemain), dan **C, D, dan E belum ada di kode.**
 
 **A. Posisi pemain di meja. ✅ Selesai.** Pemain sendiri selalu di bawah; pemain yang bermain berikutnya (menurut urutan bergabung ke Room) di kanan, lalu atas, lalu kiri, yaitu berlawanan arah jarum jam. Contoh dari sudut pandang Host: Player 1 bawah, Player 2 kanan, Player 3 atas, Player 4 kiri; dari sudut pandang Player 2: Player 3 kanan, Player 4 atas, Player 1 kiri. Hanya posisi tampilan yang berubah (`seatSides` di `frontend/src/utils/gameLayout.js`, termasuk layout sempit di HP); urutan giliran, validasi, dan ID pemain tidak berubah.
 
@@ -516,7 +497,7 @@ Contoh Room 5K dari saldo 20.000: juara 1 menjadi 25.000, juara 2 23.000, juara 
 
 **E. Arsitektur Wallet.** Modular dan terpisah dari Game Engine: Wallet Service, saldo pemain, riwayat transaksi (saldo sebelum/sesudah, delta, alasan, ID set, peringkat akhir), dan pencegahan pemrosesan ganda akibat event berulang, refresh, atau reconnect. Saldo adalah koin virtual: **tidak** ada top-up, pembayaran, cash-out, atau integrasi uang sungguhan.
 
-**Belum diputuskan (jangan diasumsikan dan jangan diimplementasikan dulu):** cara menangani peringkat seri (poin total sama) dan perlakuan set yang tidak selesai (mis. Room ditinggalkan).
+**Belum ditetapkan:** cara menangani peringkat seri (poin total sama) dan perlakuan set yang tidak selesai (mis. Room ditinggalkan). Keduanya perlu diputuskan sebelum wallet (C–E) dikerjakan; status kerjanya ada di [HANDOFF.md](HANDOFF.md).
 
 ---
 

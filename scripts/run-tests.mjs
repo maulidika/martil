@@ -62,6 +62,7 @@ const DEFAULT_SUITES = [
   feBash('lobby-ui'),
   feBash('game-ui'),
   { name: 'tools:runner', cwd: '.', cmd: ['node', 'scripts/run-tests.test.mjs'] },
+  { name: 'tools:docs', cwd: '.', cmd: ['node', 'scripts/docs-check.test.mjs'] },
 ];
 
 // ── arguments ────────────────────────────────────────────────────────────────────────────────────────

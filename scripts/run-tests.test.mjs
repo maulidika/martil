@@ -196,12 +196,15 @@ test('pemakaian salah → exit 2 dengan pesan dan bantuan; --help → exit 0', (
   assert.match(bad.out, /tidak bisa membaca --suites/);
 });
 
-test('daftar bawaan: setiap berkas tes backend dan setiap folder tes frontend terdaftar di runner (tidak ada yang terlupa)', () => {
+test('daftar bawaan: setiap berkas tes backend, folder tes frontend, dan tes alat (scripts/*.test.mjs) terdaftar di runner (tidak ada yang terlupa)', () => {
   const src = fs.readFileSync(RUNNER, 'utf8');
   const backend = fs.readdirSync(path.join(ROOT, 'backend/tests'), { withFileTypes: true }).filter((d) => d.isFile() && d.name.endsWith('.js')).map((d) => d.name);
   assert.ok(backend.length >= 15, 'daftar tes backend tidak terbaca');
   for (const f of backend) assert.ok(src.includes(`'${f}'`), `backend/tests/${f} belum terdaftar di scripts/run-tests.mjs`);
   assert.ok(fs.existsSync(path.join(ROOT, 'backend/src/game/engine.test.js')) && src.includes('node_modules/jest/bin/jest.js'), 'Jest (engine.test.js) harus terdaftar');
+  const tools = fs.readdirSync(path.join(ROOT, 'scripts')).filter((f) => f.endsWith('.test.mjs'));
+  assert.ok(tools.length >= 2, 'daftar tes alat tidak terbaca');
+  for (const f of tools) assert.ok(src.includes(`'scripts/${f}'`), `scripts/${f} belum terdaftar di scripts/run-tests.mjs`);
   const frontend = fs.readdirSync(path.join(ROOT, 'frontend/tests'), { withFileTypes: true }).filter((d) => d.isDirectory() && d.name !== 'browser').map((d) => d.name);
   assert.ok(frontend.length >= 7, 'daftar tes frontend tidak terbaca');
   for (const d of frontend) {
