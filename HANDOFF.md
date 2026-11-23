@@ -4,7 +4,7 @@ Satu-satunya file status kerja. Diperbarui di setiap tahap (lewat patch docs yan
 
 ## Cap pembaruan
 
-**Pembaruan terakhir:** tahap S3 (konstanta bersama sisi backend), 2026-11-23, patch terakhir s3-0003
+**Pembaruan terakhir:** tahap R1 (import tak terpakai), 2026-11-23, patch terakhir r1-0002
 
 ## Cara memakai file ini
 
@@ -46,7 +46,7 @@ Kecuali saya minta eksplisit: jangan ubah aturan permainan, sistem giliran, Comb
 
 Sudah diterapkan di ZIP terbaru: patch 0001-0011, h6-0001/0002, h7-0001/0002, h7fix-0001..0006, s1-0001..0003, a1-0001..0004, h8-0001/0002, r3-0001/0002, r3fix-0001, s8-0001/0002, s9-0001/0002, s2-0001/0002, d1-0001/0002.
 
-Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): s3-0001/0002/0003 (konstanta Room/game satu definisi di backend + penjaga drift frontend; s3-0003 menyelaraskan status S2 dan D1 di HANDOFF.md).
+Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): s3-0001/0002/0003 (konstanta Room/game satu definisi di backend + penjaga drift frontend; s3-0003 menyelaraskan status S2 dan D1 di HANDOFF.md), r1-0001/0002 (penjaga import tak terpakai, suite `tools:imports`; dipasang SETELAH s3-0001 karena ikut memeriksa backend).
 
 | Item | Status |
 |---|---|
@@ -65,7 +65,7 @@ Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): 
 | S5 pecah LobbyPage jadi HomeView dan RoomView (route tetap `/lobby`) | belum |
 | S6 pisahkan tanggung jawab backend bertahap (timer, akses DB, payload) | belum |
 | S7 rapikan event (`player_joined` mati, `kick_done` tak didengar, error ganda, `join_room` menyiarkan state satu pemain) | belum |
-| R1 import/ekspor tak terpakai | belum |
+| R1 import/ekspor tak terpakai: import dibersihkan dan dijaga tes `tools:imports`; ekspor tidak diubah (lihat Temuan terbuka) | dikirim, menunggu verifikasi |
 | R2 selector pada `useGameStore()` | belum |
 | R4 dependency/berkas (`ioredis`, `martil: file:..`, field `engines`, `trace-sockets.js`, folder `Patch/`) | belum |
 | R5 minor (cabang `!next` engine, auth/me, register race 409, `emitPrivateStates` O(n), logout tidak kirim `leave_room`) | belum |
@@ -114,15 +114,17 @@ Sudah dilaporkan, BELUM dikerjakan; tunggu keputusan saya:
 - State Room hidup di memori dan hilang saat server restart (fase sebelum online).
 - Validasi join di frontend memakai `code.length < 4`, tidak konsisten dengan kode Room 6 karakter. Mengubahnya mengubah perilaku UI (pesan lokal vs `ROOM_NOT_FOUND` dari server), jadi menunggu keputusan saya; kandidat S3b.
 - Folder `Patch/` tidak lengkap (berhenti di s1) dan riwayat sebenarnya ada di git: pindahkan ke luar repo atau hapus (keputusan di R4).
+- `import React` tidak dipakai secara eksplisit di 9 berkas frontend, tetapi sengaja dipertahankan: Vite memakai runtime JSX otomatis, sedangkan harness render (`combo-ui`, `kick-ui`, `lobby-ui`) mengompilasi dengan `jsx: 'transform'` dan butuh `React` di scope. Pengecualiannya tertulis (dengan alasan) di `ALLOWED_UNUSED` pada `scripts/imports-check.test.mjs`.
+- Ekspor yang tidak diimpor berkas `src` lain hampir semuanya dipakai internal atau oleh tes, jadi dibiarkan. Satu-satunya yang mati total: `SUIT_SYMBOL` di `backend/src/game/deck.js` (diekspor, tidak dipakai di mana pun); tidak diubah karena itu berkas permainan, tunggu keputusan saya.
 
 ## Baseline tes
 
-Satu perintah dari root: `npm test`. Angka yang diharapkan setelah s3:
+Satu perintah dari root: `npm test`. Angka yang diharapkan setelah r1:
 
-- Sandbox: 28 suite, 27 PASS + 1 SKIP (`backend:jest`), 463 tes terhitung.
-- Komputer saya (dengan `npm install` dan bash): tanpa SKIP; `backend:config-jwt` 21 (satu tes round trip `jsonwebtoken` asli ikut jalan) dan Jest 3, jadi sekitar 467.
+- Sandbox: 29 suite, 28 PASS + 1 SKIP (`backend:jest`), 475 tes terhitung.
+- Komputer saya (dengan `npm install` dan bash): tanpa SKIP; `backend:config-jwt` 21 (satu tes round trip `jsonwebtoken` asli ikut jalan) dan Jest 3, jadi sekitar 479.
 
-Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tanpa hitungan), card-ids 16, payload-guards 10, turn-timer 8, intermission 12, max-games 9, single-room 14, profiles 16, host-retention 20, config-jwt 20 (+1 di komputer saya), debug-log 10, db-schema 20, db-persistence 12, room-code-case 12, constants 16, Jest 3 (`engine.test.js`). Frontend: sync 37, server-errors 8, player-names 12, combo-ui 48 + 26 (render) = 74, kick-ui 5 + 16 (render) = 21, lobby-ui 10 (render), game-ui 17. Alat: `tools:runner` 20, `tools:docs` 13.
+Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tanpa hitungan), card-ids 16, payload-guards 10, turn-timer 8, intermission 12, max-games 9, single-room 14, profiles 16, host-retention 20, config-jwt 20 (+1 di komputer saya), debug-log 10, db-schema 20, db-persistence 12, room-code-case 12, constants 16, Jest 3 (`engine.test.js`). Frontend: sync 37, server-errors 8, player-names 12, combo-ui 48 + 26 (render) = 74, kick-ui 5 + 16 (render) = 21, lobby-ui 10 (render), game-ui 17. Alat: `tools:runner` 20, `tools:docs` 13, `tools:imports` 12.
 
 `npm test -- --strict` menganggap SKIP sebagai gagal.
 
@@ -130,4 +132,4 @@ Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tan
 
 Mulai dengan: (1) baca `HANDOFF.md`, `README.md`, dan kode di ZIP, (2) jalankan `npm test` dan cocokkan dengan Baseline tes, (3) usulkan item berikutnya dengan audit read-only singkat dan tunggu persetujuan saya sebelum mengubah kode.
 
-Kandidat tanpa keputusan aturan: S3b (frontend memakai modul konstanta bersama), username case-insensitive (butuh keputusan data lama), R1/R2. Wallet (C-E) menunggu keputusan peringkat seri dan set yang tidak selesai: jangan diasumsikan, tanyakan.
+Kandidat tanpa keputusan aturan: S3b (frontend memakai modul konstanta bersama), username case-insensitive (butuh keputusan data lama), R2. Wallet (C-E) menunggu keputusan peringkat seri dan set yang tidak selesai: jangan diasumsikan, tanyakan.

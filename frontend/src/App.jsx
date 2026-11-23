@@ -1,5 +1,5 @@
-import React, { useEffect } from 'react'
-import { Routes, Route, Navigate, useNavigate } from 'react-router-dom'
+import React from 'react'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import { useGameStore } from './store/gameStore'
 import { useSocket } from './hooks/useSocket'
 import LoginPage  from './pages/LoginPage'
