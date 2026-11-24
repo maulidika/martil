@@ -56,6 +56,7 @@ const DEFAULT_SUITES = [
     requires: [{ type: 'file', path: 'node_modules/jest/bin/jest.js', reason: 'jest belum terpasang: jalankan "npm install" di folder backend' }],
   },
   fe('sync', ['node', 'tests/sync.sim/main.mjs']),
+  fe('store-selectors', ['node', 'tests/store-selectors/run.mjs']),
   fe('server-errors', ['node', 'tests/server-errors/run.mjs']),
   fe('player-names', ['node', 'tests/player-names/run.mjs']),
   feBash('combo-ui'),

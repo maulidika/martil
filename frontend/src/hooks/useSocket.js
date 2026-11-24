@@ -80,10 +80,14 @@ export function retryConnection() {
 
 export function useSocket() {
   const navigate = useNavigate()
+  // Subscribe to `token` only. The rest are store actions (created once, never replaced), so reading them with getState()
+  // gives the same functions without subscribing: a whole-store subscription here re-rendered <App> and the routed page
+  // on every store change (card selection, game events, timers).
+  const token = useGameStore((s) => s.token)
   const {
-    token, setConnected, setRoomCode, setRoomInfo,
+    setConnected, setRoomCode, setRoomInfo,
     setGameState, setCurrentTurn, pushEvent, setSetResult, setError,
-  } = useGameStore()
+  } = useGameStore.getState()
 
   useEffect(() => {
     if (!token) return

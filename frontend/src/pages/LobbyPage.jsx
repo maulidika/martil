@@ -33,7 +33,7 @@ const s = {
 
 export default function LobbyPage() {
   const navigate  = useNavigate()
-  const { user, token, roomCode, roomInfo, logout, events, setResult, restricted, error, clearError } = useGameStore()
+  const { user, roomCode, roomInfo, logout, events, setResult, restricted, error, clearError } = useGameStore()
   const [kickTarget, setKickTarget] = useState(null)   // id pemain yang menunggu konfirmasi Kick
   const [joinInput, setJoinInput] = useState('')
   const [maxGames, setMaxGames]   = useState(4)

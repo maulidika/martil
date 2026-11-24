@@ -20,7 +20,7 @@ const C = { deep:'#0f3460', accent:'#e94560', border:'#1a4a7a' }
 export default function GamePage() {
   const navigate = useNavigate()
   const { user, roomCode, gameState, currentTurn, selectedIds,
-          setSelection, clearSelection, events, roomInfo, connected, setError, error, clearError } = useGameStore()
+          setSelection, events, roomInfo, connected, setError, error, clearError } = useGameStore()
 
   const currentRoomCode = roomCode || roomInfo?.code
   // Display name of another player (real username from the server profiles; 'kamu' for yourself).
