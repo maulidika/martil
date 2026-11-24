@@ -38,7 +38,7 @@ Tujuan proyek: pengalaman bermain yang adil dan stabil (server sebagai sumber ke
 
 ## ⚡ Quick Start
 
-Prasyarat: **Node.js 22.x** dan npm. Backend memakai modul bawaan `node:sqlite`, yang hanya ada di Node.js versi baru. **Satu-satunya versi yang pernah diuji adalah v22.23.4.** Batas versi minimum belum diverifikasi; versi lain (termasuk 22.x yang lebih lama) belum diuji.
+Prasyarat: **Node.js 22.x** dan npm. Backend memakai modul bawaan `node:sqlite`, yang hanya ada di Node.js versi baru. **Satu-satunya versi yang pernah diuji adalah v22.23.4.** Batas versi minimum belum diverifikasi; versi lain (termasuk 22.x yang lebih lama) belum diuji. `package.json` root dan backend memuat `engines.node` = `22.x` (npm hanya memberi peringatan bila versinya beda).
 
 ```bash
 # 1. Masuk ke folder proyek (folder yang berisi package.json root)
@@ -97,7 +97,7 @@ martil-main/
 ├── README.md                    ← dokumentasi utama (dokumen ini)
 ├── HANDOFF.md                   ← status kerja, keputusan, dan backlog; diperbarui setiap tahap
 ├── package.json                 ← skrip root (install:all, dev, build, test, ...)
-├── scripts/                     ← run-tests.mjs (runner `npm test`) dan tes untuk runner, dokumentasi, dan import tak terpakai
+├── scripts/                     ← run-tests.mjs (runner `npm test`) dan tes untuk runner, dokumentasi, import tak terpakai, dan dependency
 ├── Patch/                       ← arsip patch lama (riwayat perubahan; tidak dipakai saat menjalankan proyek)
 │
 ├── backend/
@@ -464,7 +464,6 @@ console.log(d.prepare('SELECT status, COUNT(*) AS n FROM rooms GROUP BY status')
 - **Riwayat tersimpan:** tabel `rooms`, `sets`, `games`, `game_scores` hanya ditulis; belum ada fitur yang membacanya. Tabel `room_players` dibuat tetapi belum dipakai. Room yang tersisa `waiting`/`playing` dari proses sebelumnya ditutup saat start; `sets.ended_at` yang NULL (set terputus) dibiarkan apa adanya.
 - **State Room/Game hanya di memori server:** hilang bila server restart; hanya mendukung satu proses.
 - **Email** pada register diterima server tetapi tidak dikirim dan tidak dipakai UI.
-- `ioredis` dan dependency `martil: file:..` tercantum di `package.json` tetapi tidak dipakai kode.
 
 ### Checklist production (belum dikerjakan)
 - [ ] Set `NODE_ENV=production` dan isi `JWT_SECRET` dengan nilai acak yang panjang (tanpa itu server production menolak start); sesuaikan `CLIENT_URL`

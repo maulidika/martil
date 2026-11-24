@@ -66,6 +66,7 @@ const DEFAULT_SUITES = [
   { name: 'tools:runner', cwd: '.', cmd: ['node', 'scripts/run-tests.test.mjs'] },
   { name: 'tools:docs', cwd: '.', cmd: ['node', 'scripts/docs-check.test.mjs'] },
   { name: 'tools:imports', cwd: '.', cmd: ['node', 'scripts/imports-check.test.mjs'] },
+  { name: 'tools:deps', cwd: '.', cmd: ['node', 'scripts/deps-check.test.mjs'] },
 ];
 
 // ── arguments ────────────────────────────────────────────────────────────────────────────────────────
