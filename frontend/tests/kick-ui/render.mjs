@@ -52,14 +52,14 @@ fs.writeFileSync(path.join(OUT, 'stubs/socket.mjs'), `export const emitSocket = 
 const map = (prefix) => (spec) => ({
   react: pathToFileURL(reactPath).href, 'react-router-dom': `${prefix}stubs/router.mjs`, zustand: `${prefix}stubs/zustand.mjs`,
   '../hooks/useSocket': `${prefix}stubs/socket.mjs`,
-}[spec] ?? ((spec.startsWith('../utils/') || spec.startsWith('../components/') || spec.startsWith('../store/')) ? spec + '.mjs' : spec))
+}[spec] ?? ((spec.startsWith('../utils/') || spec.startsWith('../components/') || spec.startsWith('../store/') || spec.startsWith('./')) ? spec + '.mjs' : spec))
 const build = (rel, dest) => {
   let code = esbuild.transformSync(fs.readFileSync(path.join(SRC, rel), 'utf8'), { loader: 'jsx', format: 'esm', target: 'es2022', jsx: 'transform', sourcefile: rel }).code
   // esbuild prints import specifiers with double quotes: accept both quote styles.
   code = code.replace(/from\s+(['"])([^'"]+)\1/g, (m, q, spec) => `from '${map('../')(spec)}'`).replace(/import\.meta\.env\.\w+/g, 'undefined')
   fs.writeFileSync(path.join(OUT, dest), code)
 }
-for (const f of ['store/gameStore.js', 'utils/kick.js', 'utils/profile.js', 'components/Modal.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
+for (const f of ['store/gameStore.js', 'utils/kick.js', 'utils/profile.js', 'components/Modal.jsx', 'components/lobbyStyles.js', 'components/HomeView.jsx', 'components/RoomView.jsx', 'pages/ResultPage.jsx', 'pages/LobbyPage.jsx']) build(f, f.replace(/\.jsx?$/, '.mjs'))
 const url = (f) => pathToFileURL(path.join(OUT, f)).href
 const { useGameStore: store } = await import(url('store/gameStore.mjs'))
 const ResultPage = (await import(url('pages/ResultPage.mjs'))).default

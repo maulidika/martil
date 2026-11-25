@@ -4,7 +4,7 @@ Satu-satunya file status kerja. Diperbarui di setiap tahap (lewat patch docs yan
 
 ## Cap pembaruan
 
-**Pembaruan terakhir:** tahap S4 sebagian (state giliran ganda), 2026-11-24, patch terakhir s4-0002
+**Pembaruan terakhir:** tahap S5 (pecah LobbyPage), 2026-11-25, patch terakhir s5-0002
 
 ## Cara memakai file ini
 
@@ -46,7 +46,7 @@ Kecuali saya minta eksplisit: jangan ubah aturan permainan, sistem giliran, Comb
 
 Sudah diterapkan di ZIP terbaru: patch 0001-0011, h6-0001/0002, h7-0001/0002, h7fix-0001..0006, s1-0001..0003, a1-0001..0004, h8-0001/0002, r3-0001/0002, r3fix-0001, s8-0001/0002, s9-0001/0002, s2-0001/0002, d1-0001/0002.
 
-Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): s3-0001/0002/0003 (konstanta Room/game satu definisi di backend + penjaga drift frontend; s3-0003 menyelaraskan status S2 dan D1 di HANDOFF.md), r1-0001/0002 (penjaga import tak terpakai, suite `tools:imports`; dipasang SETELAH s3-0001 karena ikut memeriksa backend), r2-0001/0002 (`useSocket` hanya berlangganan `token`, suite `frontend:store-selectors`; dipasang SETELAH r1), r4-0001/0002 (`ioredis` dan `martil: file:..` dihapus, `engines.node` 22.x, suite `tools:deps`; mengubah `package.json` dan kedua lockfile), s4-0001/0002 (dua salinan `currentTurn` dijaga konsisten, suite `frontend:store-invariants`; S4 baru sebagian).
+Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): s3-0001/0002/0003 (konstanta Room/game satu definisi di backend + penjaga drift frontend; s3-0003 menyelaraskan status S2 dan D1 di HANDOFF.md), r1-0001/0002 (penjaga import tak terpakai, suite `tools:imports`; dipasang SETELAH s3-0001 karena ikut memeriksa backend), r2-0001/0002 (`useSocket` hanya berlangganan `token`, suite `frontend:store-selectors`; dipasang SETELAH r1), r4-0001/0002 (`ioredis` dan `martil: file:..` dihapus, `engines.node` 22.x, suite `tools:deps`; mengubah `package.json` dan kedua lockfile), s4-0001/0002 (dua salinan `currentTurn` dijaga konsisten, suite `frontend:store-invariants`; S4 baru sebagian), s5-0001/0002 (`LobbyPage` dipecah jadi `HomeView` dan `RoomView`, suite `frontend:lobby-views`; mengubah tiga tes lama, lihat Temuan terbuka).
 
 | Item | Status |
 |---|---|
@@ -62,7 +62,7 @@ Dikirim dan MENUNGGU VERIFIKASI SAYA (sunting baris ini bila sudah diterapkan): 
 | S3 konstanta bersama: backend satu definisi (`backend/src/constants.js`), frontend dijaga tes (tidak diubah) | dikirim, menunggu verifikasi |
 | S3b frontend memakai satu modul konstanta (menggantikan literal; butuh ubah enam harness tes frontend yang membangun berkas satu per satu) | belum |
 | S4 kurangi state ganda di store (`currentTurn`, `roomCode`, `roomInfo.game` vs `gameState`, events sebagai bus) | SEBAGIAN: dua salinan `currentTurn` dijaga konsisten dan dijaga tes `frontend:store-invariants` (dikirim, menunggu verifikasi); sisanya lihat Temuan terbuka |
-| S5 pecah LobbyPage jadi HomeView dan RoomView (route tetap `/lobby`) | belum |
+| S5 pecah LobbyPage jadi HomeView dan RoomView (route tetap `/lobby`) | dikirim, menunggu verifikasi |
 | S6 pisahkan tanggung jawab backend bertahap (timer, akses DB, payload) | belum |
 | S7 rapikan event (`player_joined` mati, `kick_done` tak didengar, error ganda, `join_room` menyiarkan state satu pemain) | belum |
 | R1 import/ekspor tak terpakai: import dibersihkan dan dijaga tes `tools:imports`; ekspor tidak diubah (lihat Temuan terbuka) | dikirim, menunggu verifikasi |
@@ -121,15 +121,17 @@ Sudah dilaporkan, BELUM dikerjakan; tunggu keputusan saya:
 - `GamePage`, `LobbyPage`, dan `ResultPage` masih memanggil `useGameStore()` tanpa selector (tercatat di `ALLOWED_WHOLE_STORE` pada `frontend/tests/store-selectors/run.mjs`): masing-masing memakai hampir semua field-nya, dan tiga harness render (`combo-ui`, `kick-ui`, `lobby-ui`) men-stub zustand dengan `useStore = () => state` yang mengabaikan selector, jadi memindahkannya berarti mengubah tiga baris tes lama. Manfaat re-render tidak terukur di sandbox (tanpa browser dan React 18), dan zustand asli tidak ada di sandbox.
 - S4 baru sebagian. `setCurrentTurn` kini ikut memperbarui `gameState.currentTurn` (sebelumnya basi setelah `turn_changed`, tetapi tidak ada kode yang membacanya; yang dibaca UI adalah `currentTurn` level atas). Belum dikerjakan: menghapus `currentTurn` level atas atau `roomCode`, karena itu mengubah 23 assertion di `frontend/tests/sync.sim/run.mjs` dan state di harness `combo-ui`, `kick-ui`, `lobby-ui`, `game-ui`. `roomCode` dan `roomInfo.code` memang bisa berbeda sementara (`room_created` tiba sebelum `room_updated`; guard `myRoom` di `LobbyPage` memakainya), jadi bukan duplikasi murni. `roomInfo.game` hanya dibaca keberadaannya (`LobbyPage`).
 - `events` dipakai sebagai bus dengan pola `events[0]?._id` di `GamePage`, `LobbyPage`, dan `ResultPage`: efek hanya melihat event terbaru. Bila dua `pushEvent` jatuh dalam satu batch render React, yang lebih awal tidak terlihat oleh efek. Belum terbukti terjadi (sandbox tanpa browser dan React 18); perbaikannya (antrean atau kursor) mengubah perilaku, jadi menunggu keputusan saya.
+- S5: `HomeView`, `RoomView`, dan `lobbyStyles` ada di `frontend/src/components/`. Keduanya murni tampilan: state (`maxGames`, `joinInput`, `kickTarget`, `exiting`), efek, socket, validasi, dan modal Kick tetap di `LobbyPage`, sehingga pilihan jumlah game dan teks kode tidak ikut reset saat pindah antara Homepage dan Room. `MAX_GAMES_OPTIONS` dan `useState(4)` tetap di `LobbyPage`. Markup dibandingkan dengan versi lama di 14 state (sandbox): HTML identik.
+- S5 mengubah tiga tes lama, hanya menambah cakupan dan tanpa melonggarkan assertion: `frontend/tests/lobby-ui/render.mjs` dan `frontend/tests/kick-ui/render.mjs` (tiga berkas baru masuk daftar build, dan aturan penulisan ulang import `./` ditambahkan pada fungsi `map`), serta `backend/tests/constants.sim.js` (guard drift kini membaca `LobbyPage.jsx`, `HomeView.jsx`, dan `RoomView.jsx` sekaligus, dengan pola dan jumlah minimum yang sama).
 
 ## Baseline tes
 
-Satu perintah dari root: `npm test`. Angka yang diharapkan setelah s4:
+Satu perintah dari root: `npm test`. Angka yang diharapkan setelah s5:
 
-- Sandbox: 32 suite, 31 PASS + 1 SKIP (`backend:jest`), 508 tes terhitung.
-- Komputer saya (dengan `npm install` dan bash): tanpa SKIP; `backend:config-jwt` 21 (satu tes round trip `jsonwebtoken` asli ikut jalan) dan Jest 3, jadi sekitar 512.
+- Sandbox: 33 suite, 32 PASS + 1 SKIP (`backend:jest`), 523 tes terhitung.
+- Komputer saya (dengan `npm install` dan bash): tanpa SKIP; `backend:config-jwt` 21 (satu tes round trip `jsonwebtoken` asli ikut jalan) dan Jest 3, jadi sekitar 527.
 
-Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tanpa hitungan), card-ids 16, payload-guards 10, turn-timer 8, intermission 12, max-games 9, single-room 14, profiles 16, host-retention 20, config-jwt 20 (+1 di komputer saya), debug-log 10, db-schema 20, db-persistence 12, room-code-case 12, constants 16, Jest 3 (`engine.test.js`). Frontend: sync 37, store-selectors 8, store-invariants 9, server-errors 8, player-names 12, combo-ui 48 + 26 (render) = 74, kick-ui 5 + 16 (render) = 21, lobby-ui 10 (render), game-ui 17. Alat: `tools:runner` 20, `tools:docs` 13, `tools:imports` 12, `tools:deps` 16.
+Per suite. Backend: reconnect 16, room-navigation 17, kick 23, combo (lulus, tanpa hitungan), card-ids 16, payload-guards 10, turn-timer 8, intermission 12, max-games 9, single-room 14, profiles 16, host-retention 20, config-jwt 20 (+1 di komputer saya), debug-log 10, db-schema 20, db-persistence 12, room-code-case 12, constants 16, Jest 3 (`engine.test.js`). Frontend: sync 37, store-selectors 8, store-invariants 9, lobby-views 15, server-errors 8, player-names 12, combo-ui 48 + 26 (render) = 74, kick-ui 5 + 16 (render) = 21, lobby-ui 10 (render), game-ui 17. Alat: `tools:runner` 20, `tools:docs` 13, `tools:imports` 12, `tools:deps` 16.
 
 `npm test -- --strict` menganggap SKIP sebagai gagal.
 

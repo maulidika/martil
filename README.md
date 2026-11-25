@@ -131,8 +131,8 @@ martil-main/
     │   ├── main.jsx, App.jsx    ← entry dan routing
     │   ├── store/gameStore.js   ← Zustand: auth, koneksi, room, game, hasil set
     │   ├── hooks/useSocket.js   ← satu koneksi Socket.IO + semua listener event
-    │   ├── pages/               ← LoginPage, LobbyPage (Homepage + Room), GamePage, ResultPage
-    │   ├── components/          ← Modal, ConnectionOverlay, GameSyncWaiting, game/ui.jsx (tampilan meja)
+    │   ├── pages/               ← LoginPage, LobbyPage (state, efek, socket, dan modal Kick; menampilkan HomeView atau RoomView), GamePage, ResultPage
+    │   ├── components/          ← Modal, ConnectionOverlay, GameSyncWaiting, HomeView, RoomView, lobbyStyles, game/ui.jsx (tampilan meja)
     │   └── utils/               ← comboDetector, comboPicker, groupChain, handUi (logika tangan),
     │                              gameLayout (ukuran/posisi kursi), profile (nama pemain + data profil sementara), gameToast,
     │                              session, kick, serverErrors (pesan error server) (logika murni untuk UI)
@@ -192,8 +192,8 @@ Empat keadaan ini **berbeda**:
 
 | Keadaan | Route | Komponen | Kapan |
 |---|---|---|---|
-| **Homepage** (di UI disebut *Menu Utama*) | `/lobby` | `LobbyPage` | Pemain sudah login tetapi belum menjadi anggota Room. Bisa **Buat Room** (pilih jumlah game per set) atau **Gabung** dengan kode 6 karakter. |
-| **Room** | `/lobby` | `LobbyPage` | Pemain anggota sebuah Room yang berstatus menunggu. Menampilkan kode Room, 4 kursi, Host: **Mulai Game** dan **Kick**, semua pemain: **Exit Room**. |
+| **Homepage** (di UI disebut *Menu Utama*) | `/lobby` | `LobbyPage` → `HomeView` | Pemain sudah login tetapi belum menjadi anggota Room. Bisa **Buat Room** (pilih jumlah game per set) atau **Gabung** dengan kode 6 karakter. |
+| **Room** | `/lobby` | `LobbyPage` → `RoomView` | Pemain anggota sebuah Room yang berstatus menunggu. Menampilkan kode Room, 4 kursi, Host: **Mulai Game** dan **Kick**, semua pemain: **Exit Room**. |
 | **Game** | `/game` | `GamePage` | Pertandingan berlangsung. |
 | **Result** | `/result` | `ResultPage` | Satu set selesai: peringkat, skor, riwayat game. |
 

@@ -182,7 +182,7 @@ function allEqual(values, expected, what, min = 1) {
 const joinChoices = (list) => (list.length > 1 ? `${list.slice(0, -1).join(', ')}, atau ${list[list.length - 1]}` : String(list[0]));
 
 test('frontend LobbyPage: MAX_GAMES_OPTIONS, default pilihan, jumlah pemain, dan panjang input kode sama dengan backend', () => {
-  const t = readFront('pages/LobbyPage.jsx');
+  const t = ['pages/LobbyPage.jsx', 'components/HomeView.jsx', 'components/RoomView.jsx'].map((f) => readFront(f)).join('\n');
   const opts = /const MAX_GAMES_OPTIONS = \[([^\]]*)\]/.exec(t);
   assert.ok(opts, 'MAX_GAMES_OPTIONS tidak ditemukan');
   assert.deepEqual(opts[1].split(',').map((x) => Number(x.trim())), [...C.ALLOWED_MAX_GAMES], 'pilihan jumlah game');
