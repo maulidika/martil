@@ -57,6 +57,7 @@ const DEFAULT_SUITES = [
   },
   fe('sync', ['node', 'tests/sync.sim/main.mjs']),
   fe('store-selectors', ['node', 'tests/store-selectors/run.mjs']),
+  fe('store-invariants', ['node', 'tests/store-invariants/run.mjs']),
   fe('server-errors', ['node', 'tests/server-errors/run.mjs']),
   fe('player-names', ['node', 'tests/player-names/run.mjs']),
   feBash('combo-ui'),

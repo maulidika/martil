@@ -104,10 +104,18 @@ export const useGameStore = create((set, get) => ({
   }),
 
   // ── Game ────────────────────────────────────────────────────────
+  // `currentTurn` (level atas) adalah yang dibaca UI; `gameState.currentTurn` adalah salinan dari snapshot server.
+  // Keduanya tidak boleh berbeda: setGameState menyalin dari snapshot, setCurrentTurn (event turn_changed / game_started)
+  // ikut memperbarui salinan di dalam gameState bila gameState sudah ada. Bila gameState belum ada (game_started tiba
+  // sebelum game_state), nilainya disimpan di level atas dan snapshot yang datang kemudian menimpanya.
+  // `roomInfo.game` hanyalah snapshot room terakhir; hanya keberadaannya yang dibaca (LobbyPage), jangan baca isinya.
   gameState:    null,
   currentTurn:  null,
   setGameState: (g) => set({ gameState: g, currentTurn: g?.currentTurn ?? null }),
-  setCurrentTurn: (id) => set({ currentTurn: id }),
+  setCurrentTurn: (id) => set((s) => ({
+    currentTurn: id,
+    gameState: s.gameState ? { ...s.gameState, currentTurn: id } : s.gameState,
+  })),
 
   // ── Card selection ──────────────────────────────────────────────
   selectedIds: [],
