@@ -3,7 +3,7 @@
 const express = require('express');
 const bcrypt  = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
-const { db } = require('../db/database');
+const users = require('../db/userStore');
 const { signToken } = require('./jwt');
 
 const router = express.Router();
@@ -22,14 +22,13 @@ router.post('/register', async (req, res) => {
     if (!/^[a-zA-Z0-9_]+$/.test(username))
       return res.status(400).json({ error: 'USERNAME_ALPHANUMERIC_ONLY' });
 
-    const existing = db().prepare('SELECT id FROM users WHERE username = ?').get(username);
+    const existing = users.findUserIdByUsername(username);
     if (existing) return res.status(409).json({ error: 'USERNAME_TAKEN' });
 
     const hash = await bcrypt.hash(password, 10);
     const id   = uuidv4();
 
-    db().prepare('INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)')
-      .run(id, username, email || null, hash);
+    users.insertUser(id, username, email, hash);
 
     const token = signToken({ id, username });
     res.status(201).json({ token, user: { id, username } });
@@ -46,7 +45,7 @@ router.post('/login', async (req, res) => {
     if (!username || !password)
       return res.status(400).json({ error: 'CREDENTIALS_REQUIRED' });
 
-    const user = db().prepare('SELECT * FROM users WHERE username = ?').get(username);
+    const user = users.findUserByUsername(username);
     if (!user) return res.status(401).json({ error: 'INVALID_CREDENTIALS' });
 
     const valid = await bcrypt.compare(password, user.password_hash);
@@ -67,7 +66,7 @@ router.get('/me', (req, res) => {
     if (!auth?.startsWith('Bearer ')) return res.status(401).json({ error: 'NO_TOKEN' });
     const { verifyToken } = require('./jwt');
     const payload = verifyToken(auth.slice(7));
-    const user = db().prepare('SELECT id, username FROM users WHERE id = ?').get(payload.id);
+    const user = users.findUserById(payload.id);
     if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' });
     res.json({ user });
   } catch {

@@ -51,6 +51,10 @@ const DEFAULT_SUITES = [
   be('db-persistence', 'db-persistence.sim.js'),
   be('room-code-case', 'room-code-case.sim.js'),
   be('constants', 'constants.sim.js'),
+  be('room-store', 'room-store.sim.js'),
+  be('game-flow', 'game-flow.sim.js'),
+  be('outgoing', 'outgoing.sim.js'),
+  be('auth-routes', 'auth-routes.sim.js'),
   {
     name: 'backend:jest', cwd: 'backend', cmd: ['node', 'node_modules/jest/bin/jest.js'],
     requires: [{ type: 'file', path: 'node_modules/jest/bin/jest.js', reason: 'jest belum terpasang: jalankan "npm install" di folder backend' }],

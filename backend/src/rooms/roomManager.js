@@ -4,7 +4,7 @@ const { v4: uuidv4 } = require('uuid');
 const { GameEngine } = require('../game/engine');
 const { PLAYERS_PER_ROOM, ROOM_CODE_LENGTH, ALLOWED_MAX_GAMES, DEFAULT_MAX_GAMES } = require('../constants');
 const { calcSetRankings } = require('../game/scorer');
-const { db } = require('../db/database');
+const store = require('../db/roomStore');
 
 // Live game state: in-memory (fast, no I/O for card data)
 // Completed results are persisted to SQLite.
@@ -94,9 +94,7 @@ function createRoom(hostId, maxGames = DEFAULT_MAX_GAMES, username) {
   rooms.set(code, room);
 
   // Persist room skeleton to DB
-  db().prepare(
-    'INSERT INTO rooms (id, code, host_id, max_games) VALUES (?, ?, ?, ?)'
-  ).run(roomId, code, hostId, maxGames);
+  store.insertRoom(roomId, code, hostId, maxGames);
 
   return { ok: true, room };
 }
@@ -134,7 +132,7 @@ function _resetRoomForNewSet(room) {
   room.gameHistory = [];
   room.currentGame = null;
   room.intermission = false;
-  db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('waiting', room.id);
+  store.setRoomStatus(room.id, 'waiting');
   return true;
 }
 
@@ -162,8 +160,8 @@ function startSet(code) {
   room.intermission = false;
   room.currentGame = GameEngine.initGame(playerIds, 1, null);
 
-  db().prepare('INSERT INTO sets (id, room_id) VALUES (?, ?)').run(setId, room.id);
-  db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('playing', room.id);
+  store.insertSet(setId, room.id);
+  store.setRoomStatus(room.id, 'playing');
 
   return { ok: true, room };
 }
@@ -226,17 +224,7 @@ function _handleGameOver(room, event) {
   });
 
   // Persist to DB
-  const stmt = db().prepare(
-    'INSERT INTO games (id, set_id, game_number, winner_id, win_type, ended_at) VALUES (?, ?, ?, ?, ?, datetime(\'now\'))'
-  );
-  stmt.run(gameId, room.setId, room.currentGame.gameNumber, event.winnerId, event.lastCombo?.winType || 'normal');
-
-  const scoreStmt = db().prepare(
-    'INSERT INTO game_scores (id, game_id, user_id, score, remaining_cards, penalty_type) VALUES (?, ?, ?, ?, ?, ?)'
-  );
-  for (const s of event.scores) {
-    scoreStmt.run(uuidv4(), gameId, s.id, s.score, JSON.stringify(s.remainingCards || []), s.penaltyType || null);
-  }
+  store.insertGame(gameId, room.setId, room.currentGame.gameNumber, event.winnerId, event.lastCombo?.winType || 'normal', event.scores);
 
   const nextNum = room.currentGame.gameNumber + 1;
 
@@ -245,8 +233,8 @@ function _handleGameOver(room, event) {
     room.status = 'done';
     room.currentGame = null;
     const rankings = calcSetRankings(room.setScores);
-    db().prepare('UPDATE sets SET ended_at = datetime(\'now\') WHERE id = ?').run(room.setId);
-    db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('done', room.id);
+    store.endSet(room.setId);
+    store.setRoomStatus(room.id, 'done');
     event.setOver    = true;
     event.rankings   = rankings;
     event.setScores  = room.setScores;
@@ -310,7 +298,7 @@ function leaveRoom(code, playerId) {
   const roomDeleted = room.players.length === 0;
   if (roomDeleted) {
     rooms.delete(code);
-    db().prepare('UPDATE rooms SET status = ? WHERE id = ?').run('closed', room.id);
+    store.setRoomStatus(room.id, 'closed');
   }
   return { ok: true, room, roomDeleted, hostChanged: !!newHostId && !roomDeleted, newHostId };
 }

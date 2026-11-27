@@ -28,7 +28,11 @@
     "test:db": "node tests/db-schema.sim.js",
     "test:persistence": "node tests/db-persistence.sim.js",
     "test:codecase": "node tests/room-code-case.sim.js",
-    "test:constants": "node tests/constants.sim.js"
+    "test:constants": "node tests/constants.sim.js",
+    "test:roomstore": "node tests/room-store.sim.js",
+    "test:gameflow": "node tests/game-flow.sim.js",
+    "test:outgoing": "node tests/outgoing.sim.js",
+    "test:authroutes": "node tests/auth-routes.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

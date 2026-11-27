@@ -2,14 +2,10 @@
 
 const { verifyToken } = require('../auth/jwt');
 const rm = require('../rooms/roomManager');
-const { TURN_TIMEOUT_MS } = require('../constants');
 const { readPayload, emitRejection, normalizeRoomCode } = require('./payload');
-
-const timers = new Map(); // roomCode → timeoutHandle
-
-function debugLog(action, details = {}) {
-  console.info(`[MARTIL ${new Date().toISOString()}] ${action}`, details);
-}
+const { debugLog } = require('./debugLog');
+const outgoing = require('./outgoing');
+const { startTimer, clearTimer, handleGameOver, emitPrivateStates, broadcastRoomEvents, startSweeper } = require('./gameFlow');
 
 /**
  * Register an event handler that can never throw into Socket.IO. Payload guards (readPayload)
@@ -28,11 +24,7 @@ function onSafe(socket, event, handler, { notify = true } = {}) {
   });
 }
 
-const SWEEP_INTERVAL_MS = 10_000;
-
 module.exports = function registerSocketHandlers(io, opts = {}) {
-  const sweepIntervalMs = opts.sweepIntervalMs ?? SWEEP_INTERVAL_MS;
-
   // ── Auth middleware ──────────────────────────────────────────────────────
   io.use((socket, next) => {
     const token = socket.handshake.auth?.token;
@@ -208,10 +200,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       if (!result.ok) return socket.emit('error', { code: result.error });
 
       emitPrivateStates(io, roomCode, result.room);
-      io.to(roomCode).emit('game_started', {
-        gameNumber:  1,
-        currentTurn: result.room.currentGame.currentTurn,
-      });
+      io.to(roomCode).emit('game_started', outgoing.gameStarted(1, result.room));
 
       startTimer(io, roomCode);
     });
@@ -230,13 +219,13 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       clearTimer(roomCode);   // accepted: the turn is over, the next branch starts a fresh timer (or none)
 
       const { event, room } = result;
-      io.to(roomCode).emit('cards_played', { playerId: userId, combo: event.combo });
+      io.to(roomCode).emit('cards_played', outgoing.cardsPlayed(userId, event));
 
       if (event.type === 'game_over') {
         handleGameOver(io, roomCode, room, event);
       } else {
         emitPrivateStates(io, roomCode, room);
-        io.to(roomCode).emit('turn_changed', { currentTurn: room.currentGame.currentTurn });
+        io.to(roomCode).emit('turn_changed', outgoing.turnChanged(room));
         startTimer(io, roomCode);
       }
     });
@@ -254,14 +243,14 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       clearTimer(roomCode);
 
       const { event, room } = result;
-      io.to(roomCode).emit('player_skipped', { playerId: userId });
+      io.to(roomCode).emit('player_skipped', outgoing.playerSkipped(userId));
 
       if (event.type === 'rally_ended') {
-        io.to(roomCode).emit('rally_ended', { nextPlayer: event.nextPlayer });
+        io.to(roomCode).emit('rally_ended', outgoing.rallyEnded(event));
       }
 
       emitPrivateStates(io, roomCode, room);
-      io.to(roomCode).emit('turn_changed', { currentTurn: room.currentGame.currentTurn });
+      io.to(roomCode).emit('turn_changed', outgoing.turnChanged(room));
       startTimer(io, roomCode);
     });
 
@@ -294,7 +283,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
   function resumeFor(socket, hintCode = null) {
     const userId = socket.user.id;
     const r = rm.resumeSession(userId, socket.id, Date.now(), hintCode);
-    if (r.events?.length) broadcastRoomEvents(r.events);
+    if (r.events?.length) broadcastRoomEvents(io, r.events);
 
     if (r.ok && r.restricted) {   // di-Kick dari Result: tetap di Result, tanpa bergabung ke socket-room mana pun
       socket.emit('session_restored', r.state);
@@ -335,117 +324,7 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
     });
   }
 
-  // ── Sweeper: kadaluarsakan pemain terputus & tutup room yang ditinggalkan ──
+  const sweeper = startSweeper(io, opts.sweepIntervalMs);
 
-  function broadcastRoomEvents(events) {
-    const touched = new Set();
-    for (const e of events) {
-      debugLog(`ROOM_${e.type.toUpperCase()}`, e);
-      if (e.type === 'room_deleted' || e.type === 'room_abandoned') clearTimer(e.code);
-      else if (e.type !== 'restriction_expired') touched.add(e.code);
-    }
-    for (const code of touched) {
-      const room = rm.getRoom(code);
-      if (!room) continue;
-      if (room.status === 'playing') emitPrivateStates(io, code, room);
-      else io.to(code).emit('room_updated', rm.publicState(code, null));
-    }
-  }
-
-  function sweep(now = Date.now()) {
-    const events = rm.sweepExpired(now);
-    if (events.length) broadcastRoomEvents(events);
-    return events;
-  }
-
-  let sweepTimer = null;
-  if (sweepIntervalMs > 0) {
-    sweepTimer = setInterval(() => sweep(), sweepIntervalMs);
-    sweepTimer.unref?.();
-  }
-
-  // ── Timer helpers ──────────────────────────────────────────────────────────
-
-  function startTimer(io, roomCode) {
-    clearTimer(roomCode);
-    const room = rm.getRoom(roomCode);
-    if (!room?.currentGame) return;
-
-    const handle = setTimeout(() => {
-      const skippedId = rm.getRoom(roomCode)?.currentGame?.currentTurn ?? null; // sebelum giliran berpindah
-      const autoResult = rm.processAutoSkip(roomCode);
-      if (!autoResult) return;
-
-      const { event, room } = autoResult;
-      debugLog('AUTO_SKIP', { roomCode, playerId: skippedId, result: event.type });
-      io.to(roomCode).emit('auto_skipped', { playerId: skippedId });
-
-      if (event.type === 'rally_ended') {
-        io.to(roomCode).emit('rally_ended', { nextPlayer: event.nextPlayer });
-      }
-      if (event.type === 'game_over') {
-        handleGameOver(io, roomCode, room, event);
-        return;
-      }
-
-      emitPrivateStates(io, roomCode, room);
-      io.to(roomCode).emit('turn_changed', { currentTurn: room.currentGame.currentTurn });
-      startTimer(io, roomCode);
-    }, TURN_TIMEOUT_MS);
-
-    timers.set(roomCode, handle);
-  }
-
-  function clearTimer(roomCode) {
-    if (timers.has(roomCode)) {
-      clearTimeout(timers.get(roomCode));
-      timers.delete(roomCode);
-    }
-  }
-
-  function handleGameOver(io, roomCode, room, event) {
-    io.to(roomCode).emit('game_over', {
-      winnerId:    event.winnerId,
-      scores:      event.scores,
-      setScores:   room.setScores,
-      gameHistory: room.gameHistory,
-    });
-
-    if (event.setOver) {
-      clearTimer(roomCode);
-      debugLog('SET_OVER', { roomCode, status: room.status, players: room.players.map(p => p.id) });
-      io.to(roomCode).emit('set_over', {
-        rankings:    event.rankings,
-        setScores:   event.setScores,
-        gameHistory: event.gameHistory,
-        profiles:    event.profiles,
-      });
-    } else {
-      setTimeout(() => {
-        // Releases the gap (plays/skips are rejected with GAME_STARTING until now) and restarts the
-        // turn clock so the timeLeft we send matches the server timer (full 30 s).
-        const fresh = rm.endIntermission(roomCode);
-        if (!fresh) return;
-        emitPrivateStates(io, roomCode, fresh);
-        io.to(roomCode).emit('game_started', {
-          gameNumber:  event.nextGame,
-          currentTurn: fresh.currentGame.currentTurn,
-        });
-        startTimer(io, roomCode);
-      }, 5000);
-    }
-  }
-
-  // Send individual private game states so opponents can't see each other's cards
-  function emitPrivateStates(io, roomCode, room) {
-    if (!room?.currentGame) return;
-    for (const [, socket] of io.sockets.sockets) {
-      if (!socket.rooms.has(roomCode)) continue;
-      const uid = socket.user?.id;
-      if (!uid) continue;
-      socket.emit('game_state', rm.publicState(roomCode, uid));
-    }
-  }
-
-  return { sweep, stop() { if (sweepTimer) clearInterval(sweepTimer); } };
+  return { sweep: sweeper.sweep, stop: sweeper.stop };
 };

@@ -111,6 +111,8 @@ martil-main/
 │   │   │   ├── jwt.js           ← sign/verify JWT + pemilihan secret (server menolak start di production bila JWT_SECRET kosong)
 │   │   │   └── routes.js        ← POST /api/auth/register, /login; GET /api/auth/me
 │   │   ├── db/database.js       ← koneksi SQLite, migrasi skema berversi (PRAGMA user_version), penutupan Room basi saat start
+│   │   ├── db/roomStore.js      ← semua SQL penyimpanan Room, Set, dan Game (dipanggil roomManager)
+│   │   ├── db/userStore.js      ← semua SQL tabel users (dipanggil auth/routes.js)
 │   │   ├── game/
 │   │   │   ├── deck.js          ← kartu, urutan rank/suit, shuffle, deal
 │   │   │   ├── validator.js     ← deteksi dan perbandingan kombinasi
@@ -118,8 +120,11 @@ martil-main/
 │   │   │   ├── cardIds.js       ← validasi bentuk daftar `cardIds` pada play_cards
 │   │   │   ├── engine.js        ← state machine satu game (giliran, rally, kemenangan)
 │   │   │   └── engine.test.js   ← uji Jest untuk perilaku rally/skip
-│   │   ├── rooms/roomManager.js ← Room, set, game, reconnect, Kick (state di memori)
-│   │   ├── socket/socketHandler.js ← semua event Socket.IO, timer giliran, sweeper
+│   │   ├── rooms/roomManager.js ← Room, set, game, reconnect, Kick (state di memori; SQL lewat db/roomStore.js)
+│   │   ├── socket/socketHandler.js ← semua event Socket.IO: memutuskan kapan alur game dipanggil
+│   │   ├── socket/gameFlow.js   ← timer giliran (auto-skip), jeda antar-game, game over, state privat per pemain, sweeper berkala
+│   │   ├── socket/outgoing.js   ← bentuk payload event game yang dikirim ke klien (satu tempat per bentuk)
+│   │   ├── socket/debugLog.js   ← satu baris log server `[MARTIL <waktu>] AKSI { detail }`
 │   │   └── socket/payload.js    ← guard bentuk payload event Socket.IO dan normalisasi kode Room
 │   └── tests/                   ← suite simulasi (`*.sim.js`) dan `combo.consistency.js`
 │       └── helpers/             ← sim.js (Socket.IO tiruan + jam simulasi), memdb.js (SQLite asli di memori)
@@ -385,7 +390,7 @@ Backend mencetak log berawalan `[MARTIL ...]` (mis. `SOCKET_CONNECTED`, `SESSION
 
 ## 🧪 Menjalankan Automated Test
 
-Semua uji berjalan **tanpa browser dan tanpa WebSocket asli**: server diuji lewat Socket.IO tiruan di memori, dengan **SQLite asli di memori** (skema sama dengan produksi, `backend/tests/helpers/memdb.js`), sehingga SQL di `roomManager.js` ikut teruji. Error SQL yang ditelan handler socket (`onSafe`) dicatat dan membuat skenario **gagal**. Yang masih di-stub hanya JWT dan uuid. `auth/routes.js` (login/register) belum punya tes.
+Semua uji berjalan **tanpa browser dan tanpa WebSocket asli**: server diuji lewat Socket.IO tiruan di memori, dengan **SQLite asli di memori** (skema sama dengan produksi, `backend/tests/helpers/memdb.js`), sehingga SQL di `db/roomStore.js` dan `db/userStore.js` ikut teruji. Error SQL yang ditelan handler socket (`onSafe`) dicatat dan membuat skenario **gagal**. Yang masih di-stub: JWT dan uuid; untuk tes login/register juga express dan bcryptjs (tiruan kecil, supaya jalan tanpa `npm install`).
 
 **Satu perintah untuk semua** (dari folder root; Node murni, jalan di Windows tanpa bash):
 ```bash
@@ -448,7 +453,7 @@ console.log(d.prepare('SELECT status, COUNT(*) AS n FROM rooms GROUP BY status')
 # diharapkan: user_version: 1 dan tidak ada lagi Room berstatus waiting/playing
 ```
 
-`npm test` (root) menjalankan semuanya. Belum teruji otomatis: SQL di `auth/routes.js` (login/register tidak punya tes; SQL `roomManager.js` sudah teruji terhadap SQLite asli di memori lewat harness `memdb`), transport Socket.IO asli, boot `server.js` yang sebenarnya (dua langkah manual di atas), dan perilaku React di browser sungguhan di luar uji render/e2e opsional di atas.
+`npm test` (root) menjalankan semuanya. Belum teruji otomatis: login/register dengan express dan bcryptjs asli (`auth/routes.js` diuji dengan tiruan; SQL `db/roomStore.js` dan `db/userStore.js` teruji terhadap SQLite asli di memori lewat harness `memdb`), transport Socket.IO asli, boot `server.js` yang sebenarnya (dua langkah manual di atas), dan perilaku React di browser sungguhan di luar uji render/e2e opsional di atas.
 
 ---
 
