@@ -103,7 +103,7 @@ test('daftar putih: klaim tambahan di token (email, role, passwordHash) tidak pe
   cb.emit('join_room', { roomCode: code });
   ca.emit('start_game', { roomCode: code });                                  // also covers error payloads etc.
   const wire = JSON.stringify([ca.socket.inbox, cb.socket.inbox, rm.publicState(code, b)]);
-  assert.ok(ca.socket.inbox.length >= 3 && cb.socket.inbox.length >= 2, 'tidak ada pesan yang diperiksa');
+  assert.ok(ca.socket.inbox.length >= 3 && cb.socket.inbox.length >= 1, 'tidak ada pesan yang diperiksa');
   for (const secret of ['budi@mail.test', 'admin', '$2a$secret', 'jwt.secret.value', 'passwordHash', 'email']) assert.ok(!wire.includes(secret), `${secret} bocor`);
   for (const id of Object.keys(ca.last('room_updated').profiles)) assert.deepEqual(Object.keys(ca.last('room_updated').profiles[id]), ['username']);
 });

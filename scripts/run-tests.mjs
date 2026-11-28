@@ -55,6 +55,7 @@ const DEFAULT_SUITES = [
   be('game-flow', 'game-flow.sim.js'),
   be('outgoing', 'outgoing.sim.js'),
   be('auth-routes', 'auth-routes.sim.js'),
+  be('join-events', 'join-events.sim.js'),
   {
     name: 'backend:jest', cwd: 'backend', cmd: ['node', 'node_modules/jest/bin/jest.js'],
     requires: [{ type: 'file', path: 'node_modules/jest/bin/jest.js', reason: 'jest belum terpasang: jalankan "npm install" di folder backend' }],
@@ -73,6 +74,7 @@ const DEFAULT_SUITES = [
   { name: 'tools:docs', cwd: '.', cmd: ['node', 'scripts/docs-check.test.mjs'] },
   { name: 'tools:imports', cwd: '.', cmd: ['node', 'scripts/imports-check.test.mjs'] },
   { name: 'tools:deps', cwd: '.', cmd: ['node', 'scripts/deps-check.test.mjs'] },
+  { name: 'tools:events', cwd: '.', cmd: ['node', 'scripts/events-check.test.mjs'] },
 ];
 
 // ── arguments ────────────────────────────────────────────────────────────────────────────────────────

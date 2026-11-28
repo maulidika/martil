@@ -76,9 +76,9 @@ module.exports = function registerSocketHandlers(io, opts = {}) {
       debugLog('JOIN_ROOM', { roomCode, userId, players: result.room.players.length });
       rm.bindSocket(roomCode, userId, socket.id);
       socket.join(roomCode);
+      // The newcomer gets the room as seen by them; everyone else gets the neutral view (never a view personalised for the newcomer).
       socket.emit('room_updated', rm.publicState(roomCode, userId));
-      // Tell everyone (including new player) about the updated room
-      io.to(roomCode).emit('room_updated', rm.publicState(roomCode, userId));
+      socket.to(roomCode).emit('room_updated', rm.publicState(roomCode, null));
     });
 
     // ── resume_session ─────────────────────────────────────────────────────

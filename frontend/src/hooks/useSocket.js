@@ -210,7 +210,6 @@ export function useSocket() {
     s.on('player_skipped',       (d) => pushEvent({ type: 'player_skipped', ...d }))
     s.on('auto_skipped',         (d) => pushEvent({ type: 'auto_skipped', ...d }))
     s.on('rally_ended',          (d) => pushEvent({ type: 'rally_ended', ...d }))
-    s.on('player_joined',        (d) => pushEvent({ type: 'player_joined', ...d }))
     s.on('player_disconnected',  (d) => pushEvent({ type: 'player_disconnected', ...d }))
     s.on('player_reconnected',   (d) => pushEvent({ type: 'player_reconnected', ...d }))
 

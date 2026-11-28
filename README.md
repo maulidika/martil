@@ -97,7 +97,7 @@ martil-main/
 ├── README.md                    ← dokumentasi utama (dokumen ini)
 ├── HANDOFF.md                   ← status kerja, keputusan, dan backlog; diperbarui setiap tahap
 ├── package.json                 ← skrip root (install:all, dev, build, test, ...)
-├── scripts/                     ← run-tests.mjs (runner `npm test`) dan tes untuk runner, dokumentasi, import tak terpakai, dan dependency
+├── scripts/                     ← run-tests.mjs (runner `npm test`) dan tes untuk runner, dokumentasi, import tak terpakai, dependency, dan inventaris event Socket.IO
 ├── Patch/                       ← arsip patch lama (riwayat perubahan; tidak dipakai saat menjalankan proyek)
 │
 ├── backend/
@@ -313,7 +313,7 @@ Koneksi memakai token JWT di handshake (`auth.token`); tanpa token valid koneksi
 |---|---|---|
 | `resume_session` | — | Pulihkan sesi (dikirim di setiap connect/reconnect) |
 | `create_room` | `{maxGames}` (3, 4, atau 5; opsional, default 4) | Buat Room |
-| `join_room` | `{roomCode}` | Gabung Room (anggota yang sudah ada diperlakukan sebagai resume) |
+| `join_room` | `{roomCode}` | Gabung Room (anggota yang sudah ada diperlakukan sebagai resume). Pendatang baru menerima satu `room_updated` berisi pandangannya sendiri; anggota lain menerima satu `room_updated` netral |
 | `leave_room` | `{roomCode}` | Exit Room / Back to Menu Utama |
 | `return_to_room` | `{roomCode}` | Back to Room dari Result |
 | `kick_player` | `{roomCode, targetId}` | Host mengeluarkan pemain |
@@ -326,10 +326,12 @@ Koneksi memakai token JWT di handshake (`auth.token`); tanpa token valid koneksi
 |---|---|
 | Sesi | `session_restored`, `session_none`, `session_replaced` |
 | Room | `room_created`, `room_updated`, `room_left`, `room_returned`, `return_room_error`, `leave_room_error` |
-| Kick | `kicked`, `kicked_from_result`, `kick_done`, `kick_error` |
+| Kick | `kicked`, `kicked_from_result`, `kick_done` (konfirmasi untuk Host; klien tidak mendengarkannya dan mengikuti `room_updated`), `kick_error` |
 | Game | `game_started`, `game_state` (kartu pribadi tiap pemain), `turn_changed`, `cards_played`, `player_skipped`, `auto_skipped`, `rally_ended`, `game_over`, `set_over` |
 | Koneksi pemain lain | `player_disconnected`, `player_reconnected` |
 | Umum | `error` `{code}` |
+
+Penolakan `leave_room` dan `return_to_room` dikirim ke dua kanal sekaligus: `leave_room_error` atau `return_room_error`, dan `error`. Klien mendengarkan keduanya.
 
 Kartu lawan tidak pernah dikirim: tiap pemain menerima `game_state` pribadi (kartu sendiri + jumlah kartu lawan).
 

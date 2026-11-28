@@ -32,7 +32,8 @@
     "test:roomstore": "node tests/room-store.sim.js",
     "test:gameflow": "node tests/game-flow.sim.js",
     "test:outgoing": "node tests/outgoing.sim.js",
-    "test:authroutes": "node tests/auth-routes.sim.js"
+    "test:authroutes": "node tests/auth-routes.sim.js",
+    "test:joinevents": "node tests/join-events.sim.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
